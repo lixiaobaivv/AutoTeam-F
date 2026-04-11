@@ -267,9 +267,9 @@ def get_task(task_id: str):
 # 后台自动巡检
 # ---------------------------------------------------------------------------
 
-AUTO_CHECK_INTERVAL = 300  # 5 分钟
-AUTO_CHECK_THRESHOLD = 10  # 剩余额度低于 10% 视为即将用完
-AUTO_CHECK_MIN_LOW = 2     # 至少 2 个账号低于阈值时触发轮转
+from autoteam.config import (
+    AUTO_CHECK_INTERVAL, AUTO_CHECK_THRESHOLD, AUTO_CHECK_MIN_LOW,
+)
 
 _auto_check_stop = threading.Event()
 
