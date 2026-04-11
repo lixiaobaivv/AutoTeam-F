@@ -59,17 +59,17 @@ async function refresh() {
 
 function onTaskStarted() {
   // 任务启动后开始快速轮询
-  startPolling(2000)
+  startPolling(3000)
   refresh()
 }
 
-function startPolling(interval = 10000) {
+function startPolling(interval = 600000) {
   stopPolling()
   pollTimer = setInterval(async () => {
     await refresh()
     // 如果没有运行中的任务，降回慢轮询
-    if (!runningTask.value && interval < 10000) {
-      startPolling(10000)
+    if (!runningTask.value && interval < 600000) {
+      startPolling(600000)
     }
   }, interval)
 }
@@ -83,7 +83,7 @@ function stopPolling() {
 
 onMounted(() => {
   refresh()
-  startPolling(10000)
+  startPolling(600000)
 })
 
 onUnmounted(() => {
