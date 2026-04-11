@@ -257,7 +257,13 @@ def _check_and_refresh(acc):
 
 def cmd_check():
     """只检查 active 账号的额度，无认证文件或 auth_error 的自动重新登录 Codex"""
-    from autoteam.config import CLOUDMAIL_DOMAIN
+    from autoteam.config import CLOUDMAIL_DOMAIN, AUTO_CHECK_THRESHOLD
+    # API 运行时配置优先（前端可修改）
+    try:
+        from autoteam.api import _auto_check_config
+        threshold = _auto_check_config.get("threshold", AUTO_CHECK_THRESHOLD)
+    except ImportError:
+        threshold = AUTO_CHECK_THRESHOLD
 
     accounts = load_accounts()
     all_active = [a for a in accounts if a["status"] == STATUS_ACTIVE]
@@ -295,10 +301,22 @@ def cmd_check():
                     w_reset = info.get("weekly_resets_at", 0)
                     p_time = time.strftime("%m-%d %H:%M", time.localtime(p_reset)) if p_reset else "?"
                     w_time = time.strftime("%m-%d %H:%M", time.localtime(w_reset)) if w_reset else "?"
-                    logger.info("[%s] 额度可用 - 5h剩余: %d%% (重置 %s) | 周剩余: %d%% (重置 %s)",
-                                email, p_remain, p_time, w_remain, w_time)
                     # 保存最新额度快照，供 status 离线展示
                     update_account(email, last_quota=info)
+                    # 低于阈值视为用完
+                    if p_remain < threshold:
+                        resets_at = p_reset or (time.time() + 18000)
+                        logger.warning("[%s] 5h剩余 %d%% < %d%%，标记为 exhausted (重置 %s)",
+                                       email, p_remain, threshold, p_time)
+                        update_account(email,
+                            status=STATUS_EXHAUSTED,
+                            quota_exhausted_at=time.time(),
+                            quota_resets_at=resets_at,
+                        )
+                        exhausted_list.append(acc)
+                    else:
+                        logger.info("[%s] 额度可用 - 5h剩余: %d%% (重置 %s) | 周剩余: %d%% (重置 %s)",
+                                    email, p_remain, p_time, w_remain, w_time)
                 else:
                     logger.info("[%s] 额度可用", email)
             elif status_str == "exhausted":
