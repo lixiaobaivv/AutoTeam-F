@@ -111,6 +111,37 @@ def sync_account_states(chatgpt_api=None):
         save_accounts(accounts)
 
 
+def _format_quota_row(email, status, qi):
+    """格式化单行账号额度信息"""
+    if qi:
+        p_pct = f"{100 - qi.get('primary_pct', 0)}%"
+        w_pct = f"{100 - qi.get('weekly_pct', 0)}%"
+        p_reset = time.strftime("%m-%d %H:%M", time.localtime(qi["primary_resets_at"])) if qi.get("primary_resets_at") else "-"
+        w_reset = time.strftime("%m-%d %H:%M", time.localtime(qi["weekly_resets_at"])) if qi.get("weekly_resets_at") else "-"
+    else:
+        p_pct = w_pct = p_reset = w_reset = "-"
+    return f"  {email:<38} {status:<10} {p_pct:<8} {w_pct:<8} {p_reset:<14} {w_reset:<14}"
+
+
+def _print_status_table(accounts, quota_cache=None):
+    """打印账号状态表格"""
+    if quota_cache is None:
+        quota_cache = {}
+
+    print(f"\n  {'邮箱':<38} {'状态':<10} {'5h':<8} {'周':<8} {'5h重置':<14} {'周重置':<14}")
+    print(f"  {'─' * 96}")
+
+    for acc in accounts:
+        email = acc["email"]
+        qi = quota_cache.get(email) or acc.get("last_quota")
+        print(_format_quota_row(email, acc["status"], qi))
+
+    active = [a for a in accounts if a["status"] == STATUS_ACTIVE]
+    standby = [a for a in accounts if a["status"] == STATUS_STANDBY]
+    exhausted = [a for a in accounts if a["status"] == STATUS_EXHAUSTED]
+    print(f"\n  活跃: {len(active)}  待命: {len(standby)}  额度用完: {len(exhausted)}  总计: {len(accounts)}")
+
+
 def cmd_status():
     """显示所有账号状态（先同步 Team 实际状态，active 账号实时查询额度）"""
     sync_account_states()
@@ -131,39 +162,7 @@ def cmd_status():
                 if status == "ok" and isinstance(info, dict):
                     quota_cache[acc["email"]] = info
 
-    print(f"\n{'邮箱':<40} {'状态':<10} {'5h额度':<12} {'周额度':<12} {'5h重置':<14} {'周重置':<14}")
-    print("-" * 105)
-    for acc in accounts:
-        email = acc["email"]
-        status = acc["status"]
-        qi = quota_cache.get(email)
-
-        if qi:
-            p_pct = f"{100 - qi['primary_pct']}%"
-            w_pct = f"{100 - qi['weekly_pct']}%"
-            p_reset = time.strftime("%m-%d %H:%M", time.localtime(qi["primary_resets_at"])) if qi.get("primary_resets_at") else "-"
-            w_reset = time.strftime("%m-%d %H:%M", time.localtime(qi["weekly_resets_at"])) if qi.get("weekly_resets_at") else "-"
-        elif acc.get("quota_resets_at"):
-            rt = acc["quota_resets_at"]
-            if time.time() >= rt:
-                p_pct = "已恢复"
-            else:
-                p_pct = "100%"
-            w_pct = "-"
-            p_reset = time.strftime("%m-%d %H:%M", time.localtime(rt)) if time.time() < rt else "已恢复"
-            w_reset = "-"
-        else:
-            p_pct = "-"
-            w_pct = "-"
-            p_reset = "-"
-            w_reset = "-"
-
-        print(f"{email:<40} {status:<10} {p_pct:<12} {w_pct:<12} {p_reset:<14} {w_reset:<14}")
-
-    active = [a for a in accounts if a["status"] == STATUS_ACTIVE]
-    standby = [a for a in accounts if a["status"] == STATUS_STANDBY]
-    exhausted = [a for a in accounts if a["status"] == STATUS_EXHAUSTED]
-    print(f"\n活跃: {len(active)}  待命: {len(standby)}  额度用完: {len(exhausted)}  总计: {len(accounts)}")
+    _print_status_table(accounts, quota_cache)
 
 
 def _check_and_refresh(acc):
@@ -243,6 +242,8 @@ def cmd_check():
                     p_time = time.strftime("%m-%d %H:%M", time.localtime(p_reset)) if p_reset else "?"
                     w_time = time.strftime("%m-%d %H:%M", time.localtime(w_reset)) if w_reset else "?"
                     print(f"[{email}] ✅ 5h: {p_remain}% (重置 {p_time}) | 周: {w_remain}% (重置 {w_time})")
+                    # 保存最新额度快照，供 status 离线展示
+                    update_account(email, last_quota=info)
                 else:
                     print(f"[{email}] ✅ 额度可用")
             elif status_str == "exhausted":
@@ -822,14 +823,6 @@ def cmd_rotate(target_seats=5):
     """
     TARGET = target_seats
 
-    # === Step 0: 同步账号状态 ===
-    print("\n=== Step 0: 同步 Team 实际状态 ===")
-    sync_account_states()
-
-    # === Step 1: 检查所有账号额度 ===
-    print("\n=== Step 1: 检查所有账号额度 ===")
-    exhausted = cmd_check()
-
     chatgpt = None
     mail_client = None
 
@@ -847,13 +840,19 @@ def cmd_rotate(target_seats=5):
             mail_client.login()
         return mail_client
 
+    print("\n[1/5] 同步 Team 状态...")
+    sync_account_states()
+
+    print("[2/5] 检查额度...")
+    exhausted = cmd_check()
+
     try:
-        # === Step 2: 移出所有额度用完的账号（包括之前已标记为 exhausted 的）===
+        # 移出所有 exhausted 账号（包括之前已标记的）
         all_accounts = load_accounts()
         all_exhausted = [a for a in all_accounts if a["status"] == STATUS_EXHAUSTED]
 
         if all_exhausted:
-            print(f"\n=== Step 2: 移出 {len(all_exhausted)} 个额度用完的账号 ===")
+            print(f"\n[3/5] 移出 {len(all_exhausted)} 个额度用完的账号...")
             ensure_chatgpt()
             for acc in all_exhausted:
                 email = acc["email"]
@@ -861,36 +860,37 @@ def cmd_rotate(target_seats=5):
                     chatgpt.start()
                 if remove_from_team(chatgpt, email):
                     update_account(email, status=STATUS_STANDBY)
-                    print(f"  {email} → standby")
+                    print(f"  ✅ {email} → standby")
         else:
-            print("\n=== Step 2: 无需移出账号 ===")
+            print("[3/5] 无需移出账号")
 
-        # === Step 3: 检查 Team 空缺 ===
-        print(f"\n=== Step 3: 检查 Team 成员数 ===")
+        # 检查空缺
         if not chatgpt or not chatgpt.browser:
             ensure_chatgpt()
         current_count = get_team_member_count(chatgpt)
         vacancies = TARGET - current_count
-        print(f"  当前成员: {current_count}，目标: {TARGET}，空缺: {max(0, vacancies)}")
 
         if vacancies <= 0:
-            print(f"\nTeam 已满（{current_count}/{TARGET}），无需补充")
+            print(f"[4/5] Team 已满 ({current_count}/{TARGET})")
             sync_to_cpa()
-            cmd_status()
+            _print_status_table(load_accounts())
             return
 
-        # === Step 4: 优先复用旧账号 ===
-        print(f"\n=== Step 4: 尝试复用旧账号填补 {vacancies} 个空缺 ===")
+        print(f"\n[4/5] 填补 {vacancies} 个空缺 (当前 {current_count}/{TARGET})...")
+
+        # 优先复用旧账号
         filled = 0
         standby_list = get_standby_accounts()
         recovered = [a for a in standby_list if a.get("_quota_recovered")]
-        print(f"  待命账号: {len(standby_list)}，额度已恢复: {len(recovered)}")
+
+        if recovered:
+            print(f"  找到 {len(recovered)} 个额度已恢复的旧账号")
 
         for acc in recovered:
             if filled >= vacancies:
                 break
             email = acc["email"]
-            print(f"\n  复用: {email}")
+            print(f"  ♻️  复用: {email}")
             if not chatgpt or not chatgpt.browser:
                 ensure_chatgpt()
             reinvite_account(chatgpt, ensure_mail(), acc)
@@ -898,38 +898,32 @@ def cmd_rotate(target_seats=5):
 
         remaining = vacancies - filled
         if remaining <= 0:
-            print(f"\n已用旧账号填满所有空缺")
+            print(f"  已用旧账号填满空缺")
             sync_to_cpa()
-            cmd_status()
+            _print_status_table(load_accounts())
             return
 
-        # === Step 5: 判断是否需要创建新账号 ===
-        # 检查当前 active 账号中是否还有额度可用的
+        # 判断是否需要创建新账号
         active_accounts = get_active_accounts()
         exhausted_emails = {a["email"] for a in load_accounts() if a["status"] == STATUS_EXHAUSTED}
         active_with_quota = [a for a in active_accounts if a["email"] not in exhausted_emails]
-
         not_recovered = [a for a in standby_list if not a.get("_quota_recovered")]
 
         if not_recovered and active_with_quota:
-            # 还有活跃可用的账号在 Team 中，且有旧号等恢复 → 暂不创建
-            print(f"\n还有 {len(not_recovered)} 个待命账号额度未恢复:")
+            print(f"\n  {len(not_recovered)} 个旧号等恢复中，Team 仍有 {len(active_with_quota)} 个可用，暂不创建")
             for a in not_recovered:
                 rt = a.get("quota_resets_at")
                 if rt:
-                    remaining_time = max(0, rt - time.time())
-                    print(f"    {a['email']} - 约 {int(remaining_time/60)} 分钟后恢复")
-                else:
-                    print(f"    {a['email']} - 恢复时间未知")
-            print(f"\nTeam 中仍有 {len(active_with_quota)} 个可用账号，暂不创建新账号")
+                    mins = max(0, int((rt - time.time()) / 60))
+                    print(f"    {a['email']} → {mins} 分钟后恢复")
             sync_to_cpa()
-            cmd_status()
+            _print_status_table(load_accounts())
             return
 
-        # 所有账号都不可用（active 全额度用完 + standby 全等恢复）→ 必须创建新号
-        print(f"\n=== Step 5: 无可复用账号，创建 {remaining} 个新账号 ===")
+        # 必须创建新号
+        print(f"\n[5/5] 创建 {remaining} 个新账号...")
         for i in range(remaining):
-            print(f"\n--- 创建第 {i+1}/{remaining} 个新账号 ---")
+            print(f"\n  --- 第 {i+1}/{remaining} 个 ---")
             if not chatgpt or not chatgpt.browser:
                 ensure_chatgpt()
             create_new_account(chatgpt, ensure_mail())
@@ -938,9 +932,9 @@ def cmd_rotate(target_seats=5):
         if chatgpt and chatgpt.browser:
             chatgpt.stop()
 
-    print("\n=== 轮转完成 ===")
+    print("\n✅ 轮转完成")
     sync_to_cpa()
-    cmd_status()
+    _print_status_table(load_accounts())
 
 
 def cmd_add():
