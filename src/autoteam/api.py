@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -266,9 +267,32 @@ def get_task(task_id: str):
 # 启动
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# 前端静态文件
+# ---------------------------------------------------------------------------
+
+DIST_DIR = Path(__file__).parent / "web" / "dist"
+
+if DIST_DIR.exists():
+    # Vite 构建的 assets 目录
+    assets_dir = DIST_DIR / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+    @app.get("/{path:path}")
+    def serve_frontend(path: str):
+        """兜底路由：serve 前端 SPA"""
+        file = DIST_DIR / path
+        if file.is_file() and ".." not in path:
+            return FileResponse(str(file))
+        return FileResponse(str(DIST_DIR / "index.html"))
+
+
 def start_server(host: str = "0.0.0.0", port: int = 8787):
     """启动 API 服务器"""
     import uvicorn
     logger.info("[API] 启动 AutoTeam API 服务器 http://%s:%d", host, port)
-    logger.info("[API] 文档地址 http://%s:%d/docs", host, port)
+    if DIST_DIR.exists():
+        logger.info("[API] 前端面板 http://%s:%d", host, port)
+    logger.info("[API] API 文档 http://%s:%d/docs", host, port)
     uvicorn.run(app, host=host, port=port, log_level="info")

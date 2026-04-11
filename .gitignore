@@ -1,7 +1,7 @@
 __pycache__/
 *.pyc
 *.egg-info/
-dist/
+/dist/
 .venv/
 screenshots/
 auth_state/
@@ -11,3 +11,4 @@ session
 bearer_token
 test.py
 .env
+web/node_modules/
