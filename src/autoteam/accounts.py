@@ -85,7 +85,7 @@ def get_standby_accounts():
                 a["_quota_recovered"] = now >= resets_at
             standby.append(a)
     # 已恢复的排前面
-    standby.sort(key=lambda x: (not x.get("_quota_recovered", False), x.get("quota_exhausted_at", 0)))
+    standby.sort(key=lambda x: (not x.get("_quota_recovered", False), x.get("quota_exhausted_at") or 0))
     return standby
 
 
