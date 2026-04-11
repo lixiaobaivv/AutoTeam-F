@@ -264,8 +264,85 @@ def get_task(task_id: str):
 
 
 # ---------------------------------------------------------------------------
-# 启动
+# 后台自动巡检
 # ---------------------------------------------------------------------------
+
+AUTO_CHECK_INTERVAL = 300  # 5 分钟
+AUTO_CHECK_THRESHOLD = 10  # 剩余额度低于 10% 视为即将用完
+AUTO_CHECK_MIN_LOW = 2     # 至少 2 个账号低于阈值时触发轮转
+
+_auto_check_stop = threading.Event()
+
+
+def _auto_check_loop():
+    """后台巡检线程：每 5 分钟检查额度，多个账号低于阈值时自动轮转"""
+    from autoteam.accounts import load_accounts, STATUS_ACTIVE
+    from autoteam.codex_auth import check_codex_quota
+
+    logger.info("[巡检] 自动巡检已启动，每 %d 分钟检查一次，阈值: %d%% / %d 个账号",
+                AUTO_CHECK_INTERVAL // 60, AUTO_CHECK_THRESHOLD, AUTO_CHECK_MIN_LOW)
+
+    while not _auto_check_stop.wait(AUTO_CHECK_INTERVAL):
+        try:
+            accounts = load_accounts()
+            active = [a for a in accounts if a["status"] == STATUS_ACTIVE
+                      and a.get("auth_file") and Path(a["auth_file"]).exists()]
+
+            if not active:
+                continue
+
+            low_accounts = []
+            for acc in active:
+                try:
+                    auth_data = json.loads(Path(acc["auth_file"]).read_text())
+                    access_token = auth_data.get("access_token")
+                    if not access_token:
+                        continue
+                    status, info = check_codex_quota(access_token)
+                    if status == "ok" and isinstance(info, dict):
+                        remaining = 100 - info.get("primary_pct", 0)
+                        if remaining < AUTO_CHECK_THRESHOLD:
+                            low_accounts.append((acc["email"], remaining))
+                    elif status == "exhausted":
+                        low_accounts.append((acc["email"], 0))
+                except Exception:
+                    pass
+
+            if low_accounts:
+                logger.info("[巡检] %d 个账号额度不足: %s",
+                            len(low_accounts),
+                            ", ".join(f"{e}({r}%)" for e, r in low_accounts))
+
+            if len(low_accounts) >= AUTO_CHECK_MIN_LOW:
+                # 检查是否有任务在跑
+                if not _playwright_lock.acquire(blocking=False):
+                    logger.info("[巡检] 有任务正在执行，跳过本轮自动轮转")
+                    continue
+                _playwright_lock.release()
+
+                logger.info("[巡检] 触发自动轮转...")
+                from autoteam.manager import cmd_rotate
+                try:
+                    _start_task("auto-rotate", cmd_rotate, {"target": 5, "trigger": "auto-check"}, 5)
+                except Exception as e:
+                    logger.error("[巡检] 自动轮转失败: %s", e)
+            else:
+                logger.info("[巡检] 额度正常，无需轮转")
+
+        except Exception as e:
+            logger.error("[巡检] 巡检异常: %s", e)
+
+
+@app.on_event("startup")
+def _start_auto_check():
+    thread = threading.Thread(target=_auto_check_loop, daemon=True)
+    thread.start()
+
+
+@app.on_event("shutdown")
+def _stop_auto_check():
+    _auto_check_stop.set()
+
 
 # ---------------------------------------------------------------------------
 # 前端静态文件
