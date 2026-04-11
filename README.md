@@ -9,6 +9,8 @@
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![Playwright](https://img.shields.io/badge/Playwright-Chromium-2EAD33?style=for-the-badge&logo=playwright&logoColor=white)](https://playwright.dev)
 [![uv](https://img.shields.io/badge/uv-Package_Manager-DE5FE9?style=for-the-badge)](https://docs.astral.sh/uv/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-API_&_Web-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![Vue](https://img.shields.io/badge/Vue_3-Frontend-4FC08D?style=for-the-badge&logo=vue.js&logoColor=white)](https://vuejs.org)
 
 </div>
 
@@ -24,7 +26,8 @@
 | 🔄 | **智能轮转** | 额度用完自动移出，优先复用旧号，万不得已才创建新号 |
 | ☁️ | **CPA 同步** | 认证文件自动上传/删除，只同步 active 账号 |
 | 👥 | **Team 管理** | 自动补满/清理成员，同步 Team 实际状态 |
-| 🌐 | **HTTP API** | FastAPI 接口，方便对接外部系统、定时任务、Web 面板 |
+| 🌐 | **HTTP API** | FastAPI 接口，方便对接外部系统、定时任务 |
+| 🖥️ | **Web 面板** | Vue 3 管理面板，账号状态、操作、任务历史一目了然 |
 
 ## 快速开始
 
@@ -130,6 +133,27 @@ curl http://localhost:8787/api/tasks/a1b2c3d4e5f6
 
 > 后台任务使用线程锁防止并发冲突，同一时间只允许一个 Playwright 操作。若有任务正在执行，新请求返回 `409 Conflict`。
 
+### Web 管理面板
+
+启动 API 后直接访问 `http://localhost:8787` 即可打开 Web 面板，无需额外安装 Node.js（构建产物已内置）。
+
+**面板功能：**
+
+- **Dashboard** — 账号统计卡片（活跃/待命/用完/总计）+ 账号表格（实时额度、颜色标签、重置时间）
+- **操作面板** — 一键执行轮转、检查额度、补满、添加、清理、同步 CPA，任务执行中自动禁用按钮
+- **任务历史** — 所有任务记录，实时状态跟踪（等待中/执行中/已完成/失败），耗时统计
+
+面板自动每 10 秒刷新数据，有任务执行时切换为 2 秒快速轮询。
+
+**前端开发（可选）：**
+
+```bash
+cd web
+npm install
+npm run dev       # Vite dev server :5173，自动代理 /api → :8787
+npm run build     # 构建产物输出到 src/autoteam/web/dist/
+```
+
 ## 工作原理
 
 ### 轮转流程
@@ -186,17 +210,25 @@ autoteam/
 ├── pyproject.toml              # 项目配置 + 依赖
 ├── setup.sh                    # 一键安装脚本
 ├── .env.example                # 配置模板
-└── src/autoteam/
-    ├── manager.py              # CLI 入口，所有命令
-    ├── api.py                  # HTTP API（FastAPI）
-    ├── config.py               # 配置加载（从 .env）
-    ├── display.py              # 虚拟显示器自动设置
-    ├── accounts.py             # 账号池持久化管理
-    ├── chatgpt_api.py          # ChatGPT 内部 API
-    ├── cloudmail.py            # CloudMail API 客户端
-    ├── codex_auth.py           # Codex OAuth + token 管理
-    ├── cpa_sync.py             # CPA 认证文件同步
-    └── invite.py               # 注册流程自动化
+├── src/autoteam/
+│   ├── manager.py              # CLI 入口，所有命令
+│   ├── api.py                  # HTTP API（FastAPI）
+│   ├── config.py               # 配置加载（从 .env）
+│   ├── display.py              # 虚拟显示器自动设置
+│   ├── accounts.py             # 账号池持久化管理
+│   ├── chatgpt_api.py          # ChatGPT 内部 API
+│   ├── cloudmail.py            # CloudMail API 客户端
+│   ├── codex_auth.py           # Codex OAuth + token 管理
+│   ├── cpa_sync.py             # CPA 认证文件同步
+│   ├── invite.py               # 注册流程自动化
+│   └── web/dist/               # 前端构建产物（已内置）
+└── web/                        # 前端源码（Vue 3 + Vite + Tailwind）
+    ├── src/
+    │   ├── App.vue             # 主组件
+    │   ├── api.js              # API 调用封装
+    │   └── components/         # Dashboard / TaskPanel / TaskHistory
+    ├── package.json
+    └── vite.config.js
 ```
 
 ## 认证文件格式
@@ -225,6 +257,8 @@ autoteam/
 | [Playwright](https://playwright.dev) | 浏览器自动化 (Chromium) |
 | [FastAPI](https://fastapi.tiangolo.com) | HTTP API 框架 |
 | [Rich](https://rich.readthedocs.io) | 终端美化输出 |
+| [Vue 3](https://vuejs.org) | Web 管理面板前端框架 |
+| [Tailwind CSS](https://tailwindcss.com) | 前端样式 |
 | xvfb | Linux 无头服务器虚拟显示 |
 | [CloudMail](https://github.com/maillab/cloud-mail) | Cloudflare Workers 临时邮箱服务 |
 | [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) | Codex 代理，认证文件同步目标 |
