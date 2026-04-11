@@ -2,12 +2,15 @@
 import autoteam.display  # noqa: F401
 
 import json
+import logging
 import time
 import uuid
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 from autoteam.config import CHATGPT_ACCOUNT_ID
+
+logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 BASE_DIR = PROJECT_ROOT
@@ -48,7 +51,7 @@ class ChatGPTTeamAPI:
         self.page = self.context.new_page()
 
         # 先访问 chatgpt.com 过 Cloudflare
-        print("[ChatGPT] 访问 chatgpt.com 过 Cloudflare...")
+        logger.info("[ChatGPT] 访问 chatgpt.com 过 Cloudflare...")
         self.page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=60000)
         time.sleep(5)
 
@@ -56,7 +59,7 @@ class ChatGPTTeamAPI:
             html = self.page.content()[:1000].lower()
             if "verify you are human" not in html and "challenge" not in self.page.url:
                 break
-            print(f"  等待 Cloudflare... ({i*5}s)")
+            logger.info("[ChatGPT] 等待 Cloudflare... (%ds)", i * 5)
             time.sleep(5)
 
         # 注入 session cookie（分片格式）
@@ -114,7 +117,7 @@ class ChatGPTTeamAPI:
         })
 
         self.context.add_cookies(cookies)
-        print("[ChatGPT] 已注入 session cookies")
+        logger.info("[ChatGPT] 已注入 session cookies")
 
         # 获取 access token
         self._fetch_access_token()
@@ -130,7 +133,7 @@ class ChatGPTTeamAPI:
             return  # 已配置
 
         if not config.CHATGPT_ACCOUNT_ID:
-            print("[ChatGPT] ⚠️  请在 .env 中配置 CHATGPT_ACCOUNT_ID")
+            logger.warning("[ChatGPT] 请在 .env 中配置 CHATGPT_ACCOUNT_ID")
             return
 
         # 用 account_id 调 API 获取 workspace 信息
@@ -147,7 +150,7 @@ class ChatGPTTeamAPI:
 
         if result and result.get("workspace_name"):
             config.CHATGPT_WORKSPACE_NAME = result["workspace_name"]
-            print(f"[ChatGPT] 自动检测到 workspace 名称: {result['workspace_name']}")
+            logger.info("[ChatGPT] 自动检测到 workspace 名称: %s", result['workspace_name'])
             return
 
         # fallback: 从 admin 页面提取 workspace 名称
@@ -172,12 +175,12 @@ class ChatGPTTeamAPI:
             }''')
             if name:
                 config.CHATGPT_WORKSPACE_NAME = name
-                print(f"[ChatGPT] 自动检测到 workspace 名称: {name}")
+                logger.info("[ChatGPT] 自动检测到 workspace 名称: %s", name)
                 return
         except Exception:
             pass
 
-        print("[ChatGPT] ⚠️  未能自动获取 workspace 名称，请在 .env 中配置 CHATGPT_WORKSPACE_NAME")
+        logger.warning("[ChatGPT] 未能自动获取 workspace 名称，请在 .env 中配置 CHATGPT_WORKSPACE_NAME")
 
     def _fetch_access_token(self):
         """通过浏览器 fetch 获取 access token"""
@@ -194,7 +197,7 @@ class ChatGPTTeamAPI:
 
         if result.get("ok") and "accessToken" in result.get("data", {}):
             self.access_token = result["data"]["accessToken"]
-            print("[ChatGPT] 已获取 access token")
+            logger.info("[ChatGPT] 已获取 access token")
             return
 
         # 尝试通过 sentinel chat requirements 获取 token
@@ -216,11 +219,11 @@ class ChatGPTTeamAPI:
         bearer_file = BASE_DIR / "bearer_token"
         if bearer_file.exists():
             self.access_token = bearer_file.read_text().strip()
-            print("[ChatGPT] 从 bearer_token 文件加载 access token")
+            logger.info("[ChatGPT] 从 bearer_token 文件加载 access token")
             return
 
         # 最后手段：导航到 chatgpt.com 让前端 JS 获取 token，然后从 localStorage 读取
-        print("[ChatGPT] 尝试通过页面获取 access token...")
+        logger.info("[ChatGPT] 尝试通过页面获取 access token...")
         self.page.goto("https://chatgpt.com/", wait_until="networkidle", timeout=60000)
         time.sleep(10)
 
@@ -250,9 +253,9 @@ class ChatGPTTeamAPI:
 
         if token:
             self.access_token = token
-            print("[ChatGPT] 从页面获取到 access token")
+            logger.info("[ChatGPT] 从页面获取到 access token")
         else:
-            print("[ChatGPT] 警告: 未能获取 access token，将尝试无 token 调用")
+            logger.warning("[ChatGPT] 未能获取 access token，将尝试无 token 调用")
 
     def _api_fetch(self, method, path, body=None):
         """在浏览器内用 fetch 调用 ChatGPT API"""
@@ -293,20 +296,20 @@ class ChatGPTTeamAPI:
             "resend_emails": True,
         }
 
-        print(f"[ChatGPT] 发送邀请到 {email} (seat_type={seat_type})...")
+        logger.info("[ChatGPT] 发送邀请到 %s (seat_type=%s)...", email, seat_type)
         result = self._api_fetch("POST", path, body)
 
         status = result["status"]
         resp_body = result["body"]
 
-        print(f"[ChatGPT] 响应状态: {status}")
+        logger.info("[ChatGPT] 响应状态: %d", status)
 
         try:
             data = json.loads(resp_body)
-            print(f"[ChatGPT] 响应内容: {json.dumps(data, indent=2)[:500]}")
+            logger.debug("[ChatGPT] 响应内容: %s", json.dumps(data, indent=2)[:500])
         except Exception:
             data = resp_body
-            print(f"[ChatGPT] 响应内容: {resp_body[:500]}")
+            logger.debug("[ChatGPT] 响应内容: %s", resp_body[:500])
 
         # 新账号用 usage_based 绕过后，需要改回 default
         if status == 200 and seat_type == "usage_based" and isinstance(data, dict):
@@ -323,13 +326,13 @@ class ChatGPTTeamAPI:
         path = f"/backend-api/accounts/{self.account_id}/invites/{invite_id}"
         body = {"seat_type": seat_type}
 
-        print(f"[ChatGPT] 修改邀请 seat_type -> {seat_type}...")
+        logger.info("[ChatGPT] 修改邀请 seat_type -> %s...", seat_type)
         result = self._api_fetch("PATCH", path, body)
 
         if result["status"] == 200:
-            print(f"[ChatGPT] ✅ seat_type 已改为 {seat_type}")
+            logger.info("[ChatGPT] seat_type 已改为 %s", seat_type)
         else:
-            print(f"[ChatGPT] ❌ 修改 seat_type 失败: {result['status']} {result['body'][:200]}")
+            logger.error("[ChatGPT] 修改 seat_type 失败: %d %s", result['status'], result['body'][:200])
 
     def list_invites(self):
         """获取当前邀请列表"""

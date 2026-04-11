@@ -1,6 +1,9 @@
 """自动设置虚拟显示器（无头服务器）— 在 import 时执行"""
 
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 
 if not os.environ.get("DISPLAY"):
     try:

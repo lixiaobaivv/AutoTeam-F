@@ -21,6 +21,7 @@ import autoteam.display  # noqa: F401 — 自动设置虚拟显示器
 import sys
 import os
 import json
+import logging
 import time
 from pathlib import Path
 
@@ -37,6 +38,8 @@ from autoteam.codex_auth import (
 )
 from autoteam.config import CHATGPT_ACCOUNT_ID
 from autoteam.cpa_sync import sync_to_cpa
+
+logger = logging.getLogger(__name__)
 
 MAIL_TIMEOUT = int(os.environ.get("MAIL_TIMEOUT", "180"))
 
@@ -105,54 +108,105 @@ def sync_account_states(chatgpt_api=None):
                     "last_active_at": None,
                 })
                 changed = True
-                print(f"[同步] 发现 Team 中新成员: {email}（已添加到本地）")
+                logger.info("[同步] 发现 Team 中新成员: %s（已添加到本地）", email)
 
     if changed:
         save_accounts(accounts)
 
 
-def _format_quota_row(email, status, qi):
-    """格式化单行账号额度信息"""
-    if qi:
-        p_pct = f"{100 - qi.get('primary_pct', 0)}%"
-        w_pct = f"{100 - qi.get('weekly_pct', 0)}%"
-        p_reset = time.strftime("%m-%d %H:%M", time.localtime(qi["primary_resets_at"])) if qi.get("primary_resets_at") else "-"
-        w_reset = time.strftime("%m-%d %H:%M", time.localtime(qi["weekly_resets_at"])) if qi.get("weekly_resets_at") else "-"
-    else:
-        p_pct = w_pct = p_reset = w_reset = "-"
-    return f"  {email:<38} {status:<10} {p_pct:<8} {w_pct:<8} {p_reset:<14} {w_reset:<14}"
-
-
 def _print_status_table(accounts, quota_cache=None):
-    """打印账号状态表格"""
+    """打印账号状态表格（使用 rich）"""
+    from rich.console import Console
+    from rich.table import Table
+    from rich.text import Text
+
     if quota_cache is None:
         quota_cache = {}
 
-    print(f"\n  {'邮箱':<38} {'状态':<10} {'5h':<8} {'周':<8} {'5h重置':<14} {'周重置':<14}")
-    print(f"  {'─' * 96}")
+    console = Console(width=120)
 
-    for acc in accounts:
+    table = Table(
+        title="AutoTeam 账号状态",
+        show_header=True,
+        header_style="bold cyan",
+        border_style="dim",
+        title_style="bold white",
+        padding=(0, 1),
+        expand=True,
+    )
+
+    table.add_column("#", style="dim", width=3, justify="right")
+    table.add_column("邮箱", style="white", no_wrap=True)
+    table.add_column("状态", justify="center", width=10)
+    table.add_column("5h 剩余", justify="right", width=8)
+    table.add_column("周 剩余", justify="right", width=8)
+    table.add_column("5h 重置", justify="center", width=12)
+    table.add_column("周 重置", justify="center", width=12)
+
+    STATUS_STYLE = {
+        STATUS_ACTIVE: ("bold green", "● active"),
+        STATUS_EXHAUSTED: ("bold red", "✗ used up"),
+        STATUS_STANDBY: ("yellow", "○ standby"),
+        STATUS_PENDING: ("dim", "… pending"),
+    }
+
+    for idx, acc in enumerate(accounts, 1):
         email = acc["email"]
         qi = quota_cache.get(email) or acc.get("last_quota")
-        print(_format_quota_row(email, acc["status"], qi))
+        status = acc["status"]
 
-    active = [a for a in accounts if a["status"] == STATUS_ACTIVE]
-    standby = [a for a in accounts if a["status"] == STATUS_STANDBY]
-    exhausted = [a for a in accounts if a["status"] == STATUS_EXHAUSTED]
-    print(f"\n  活跃: {len(active)}  待命: {len(standby)}  额度用完: {len(exhausted)}  总计: {len(accounts)}")
+        style, status_label = STATUS_STYLE.get(status, ("dim", status))
+        status_text = Text(status_label, style=style)
+
+        if qi:
+            p_val = 100 - qi.get("primary_pct", 0)
+            w_val = 100 - qi.get("weekly_pct", 0)
+            p_pct = Text(f"{p_val}%", style="green" if p_val > 30 else "yellow" if p_val > 0 else "red")
+            w_pct = Text(f"{w_val}%", style="green" if w_val > 30 else "yellow" if w_val > 0 else "red")
+            p_reset = time.strftime("%m-%d %H:%M", time.localtime(qi["primary_resets_at"])) if qi.get("primary_resets_at") else "-"
+            w_reset = time.strftime("%m-%d %H:%M", time.localtime(qi["weekly_resets_at"])) if qi.get("weekly_resets_at") else "-"
+        else:
+            p_pct = Text("-", style="dim")
+            w_pct = Text("-", style="dim")
+            p_reset = "-"
+            w_reset = "-"
+
+        table.add_row(
+            str(idx), email, status_text,
+            p_pct, w_pct,
+            Text(p_reset, style="dim"), Text(w_reset, style="dim"),
+        )
+
+    console.print()
+    console.print(table)
+
+    # 统计摘要
+    active = sum(1 for a in accounts if a["status"] == STATUS_ACTIVE)
+    standby = sum(1 for a in accounts if a["status"] == STATUS_STANDBY)
+    exhausted = sum(1 for a in accounts if a["status"] == STATUS_EXHAUSTED)
+    console.print(
+        f"  [green]● 活跃 {active}[/]  "
+        f"[yellow]○ 待命 {standby}[/]  "
+        f"[red]✗ 用完 {exhausted}[/]  "
+        f"[dim]总计 {len(accounts)}[/]",
+    )
 
 
 def cmd_status():
     """显示所有账号状态（先同步 Team 实际状态，active 账号实时查询额度）"""
+    logger.info("[状态] 同步 Team 实际状态...")
     sync_account_states()
 
     accounts = load_accounts()
     if not accounts:
-        print("暂无账号")
+        logger.info("[状态] 暂无账号")
         return
 
     # active 账号实时查询额度
     quota_cache = {}
+    active_count = sum(1 for a in accounts if a["status"] == STATUS_ACTIVE and a.get("auth_file") and Path(a["auth_file"]).exists())
+    if active_count:
+        logger.info("[状态] 查询 %d 个 active 账号额度...", active_count)
     for acc in accounts:
         if acc["status"] == STATUS_ACTIVE and acc.get("auth_file") and Path(acc["auth_file"]).exists():
             auth_data = json.loads(Path(acc["auth_file"]).read_text())
@@ -186,17 +240,17 @@ def _check_and_refresh(acc):
 
     # token 过期，尝试刷新
     if status == "auth_error" and rt:
-        print(f"[{email}] token 过期，尝试刷新...")
+        logger.info("[%s] token 过期，尝试刷新...", email)
         new_tokens = refresh_access_token(rt)
         if new_tokens:
             auth_data["access_token"] = new_tokens["access_token"]
             auth_data["refresh_token"] = new_tokens.get("refresh_token", rt)
             auth_data["last_refresh"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             Path(auth_file).write_text(json.dumps(auth_data, indent=2))
-            print(f"[{email}] token 已刷新，重新检查额度...")
+            logger.info("[%s] token 已刷新，重新检查额度...", email)
             status, info = check_codex_quota(new_tokens["access_token"])
         else:
-            print(f"[{email}] token 刷新失败")
+            logger.error("[%s] token 刷新失败", email)
 
     return status, info
 
@@ -220,7 +274,7 @@ def cmd_check():
                 no_auth_list.append(a)
 
     if not active_with_auth and not no_auth_list:
-        print("没有可检查的 active 账号")
+        logger.info("[检查] 没有可检查的 active 账号")
         return []
 
     # 检查有认证文件的账号额度
@@ -228,7 +282,7 @@ def cmd_check():
     auth_error_list = []
 
     if active_with_auth:
-        print(f"\n检查 {len(active_with_auth)} 个 active 账号的额度...\n")
+        logger.info("[检查] 检查 %d 个 active 账号的额度...", len(active_with_auth))
         for acc in active_with_auth:
             email = acc["email"]
             status_str, info = _check_and_refresh(acc)
@@ -241,14 +295,15 @@ def cmd_check():
                     w_reset = info.get("weekly_resets_at", 0)
                     p_time = time.strftime("%m-%d %H:%M", time.localtime(p_reset)) if p_reset else "?"
                     w_time = time.strftime("%m-%d %H:%M", time.localtime(w_reset)) if w_reset else "?"
-                    print(f"[{email}] ✅ 5h: {p_remain}% (重置 {p_time}) | 周: {w_remain}% (重置 {w_time})")
+                    logger.info("[%s] 额度可用 - 5h剩余: %d%% (重置 %s) | 周剩余: %d%% (重置 %s)",
+                                email, p_remain, p_time, w_remain, w_time)
                     # 保存最新额度快照，供 status 离线展示
                     update_account(email, last_quota=info)
                 else:
-                    print(f"[{email}] ✅ 额度可用")
+                    logger.info("[%s] 额度可用", email)
             elif status_str == "exhausted":
                 resets_at = info
-                print(f"[{email}] ❌ 额度已用完")
+                logger.warning("[%s] 额度已用完", email)
                 update_account(email,
                     status=STATUS_EXHAUSTED,
                     quota_exhausted_at=time.time(),
@@ -256,30 +311,30 @@ def cmd_check():
                 )
                 exhausted_list.append(acc)
             elif status_str == "auth_error":
-                print(f"[{email}] ⚠️  认证失败，需要重新登录 Codex")
+                logger.warning("[%s] 认证失败，需要重新登录 Codex", email)
                 auth_error_list.append(acc)
 
     # 无认证文件的 active 账号也需要重新登录
     if no_auth_list:
-        print(f"\n发现 {len(no_auth_list)} 个 active 账号无认证文件，需要登录 Codex:")
+        logger.info("[检查] 发现 %d 个 active 账号无认证文件，需要登录 Codex:", len(no_auth_list))
         for a in no_auth_list:
-            print(f"  {a['email']}")
+            logger.info("[检查]   %s", a['email'])
         auth_error_list.extend(no_auth_list)
 
     # auth_error + 无认证文件的统一重新登录 Codex
     if auth_error_list:
-        print(f"\n=== 重新登录 {len(auth_error_list)} 个 token 失效的账号 ===")
+        logger.info("[检查] 重新登录 %d 个 token 失效的账号...", len(auth_error_list))
         mail_client = CloudMailClient()
         mail_client.login()
         for acc in auth_error_list:
             email = acc["email"]
             password = acc.get("password", "")
-            print(f"\n[{email}] 重新 Codex 登录...")
+            logger.info("[%s] 重新 Codex 登录...", email)
             bundle = login_codex_via_browser(email, password, mail_client=mail_client)
             if bundle:
                 auth_file = save_auth_file(bundle)
                 update_account(email, auth_file=auth_file)
-                print(f"[{email}] ✅ token 已更新")
+                logger.info("[%s] token 已更新", email)
                 # 重新检查额度
                 status_str, info = _check_and_refresh(
                     find_account(load_accounts(), email))
@@ -290,11 +345,11 @@ def cmd_check():
                         quota_resets_at=info,
                     )
                     exhausted_list.append(acc)
-                    print(f"[{email}] ❌ 额度已用完")
+                    logger.warning("[%s] 额度已用完", email)
                 elif status_str == "ok":
-                    print(f"[{email}] ✅ 额度可用")
+                    logger.info("[%s] 额度可用", email)
             else:
-                print(f"[{email}] ❌ Codex 登录失败，标记为 standby")
+                logger.error("[%s] Codex 登录失败，标记为 standby", email)
                 update_account(email, status=STATUS_STANDBY)
 
     return exhausted_list
@@ -307,14 +362,14 @@ def remove_from_team(chatgpt_api, email):
     result = chatgpt_api._api_fetch("GET", path)
 
     if result["status"] != 200:
-        print(f"[Team] 获取成员列表失败: {result['status']}")
+        logger.error("[Team] 获取成员列表失败: %d", result['status'])
         return False
 
     try:
         data = json.loads(result["body"])
         members = data.get("items", data.get("users", data.get("members", [])))
     except Exception:
-        print(f"[Team] 解析成员列表失败")
+        logger.error("[Team] 解析成员列表失败")
         return False
 
     # 找到对应邮箱的成员
@@ -326,7 +381,7 @@ def remove_from_team(chatgpt_api, email):
             break
 
     if not target_user_id:
-        print(f"[Team] 未在成员列表中找到 {email}")
+        logger.info("[Team] 未在成员列表中找到 %s（可能已移出）", email)
         # 可能已经不在 team 了
         return True
 
@@ -335,10 +390,10 @@ def remove_from_team(chatgpt_api, email):
     result = chatgpt_api._api_fetch("DELETE", delete_path)
 
     if result["status"] in (200, 204):
-        print(f"[Team] ✅ 已将 {email} 移出 Team")
+        logger.info("[Team] 已将 %s 移出 Team", email)
         return True
     else:
-        print(f"[Team] ❌ 移除失败: {result['status']} {result['body'][:200]}")
+        logger.error("[Team] 移除 %s 失败: %d %s", email, result['status'], result['body'][:200])
         return False
 
 
@@ -349,10 +404,10 @@ def invite_to_team(chatgpt_api, email, seat_type="default"):
         errored = data.get("errored_emails", [])
         if errored:
             err_msg = errored[0].get("error", "unknown")
-            print(f"[Team] 邀请 {email} 被拒绝: {err_msg}")
+            logger.warning("[Team] 邀请 %s 被拒绝: %s", email, err_msg)
             # default 失败则尝试 usage_based
             if seat_type == "default":
-                print(f"[Team] 尝试 usage_based 方式...")
+                logger.info("[Team] 尝试 usage_based 方式...")
                 return invite_to_team(chatgpt_api, email, seat_type="usage_based")
             return False
     return status == 200
@@ -363,7 +418,7 @@ def _complete_registration(email, password, invite_link, mail_client):
     from autoteam.invite import register_with_invite
     from playwright.sync_api import sync_playwright
 
-    print(f"开始注册 {email}...")
+    logger.info("[注册] 开始注册 %s...", email)
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=False,
@@ -378,7 +433,7 @@ def _complete_registration(email, password, invite_link, mail_client):
         browser.close()
 
     if not result:
-        print(f"❌ 注册 {email} 失败")
+        logger.error("[注册] 注册 %s 失败", email)
         return None
 
     # Codex 登录
@@ -386,11 +441,11 @@ def _complete_registration(email, password, invite_link, mail_client):
     if bundle:
         auth_file = save_auth_file(bundle)
         update_account(email, status=STATUS_ACTIVE, auth_file=auth_file, last_active_at=time.time())
-        print(f"✅ 账号就绪: {email}")
+        logger.info("[注册] 账号就绪: %s", email)
         return email
     else:
         update_account(email, status=STATUS_ACTIVE)
-        print(f"⚠️  账号已加入 Team 但 Codex 登录失败: {email}")
+        logger.warning("[注册] 账号已加入 Team 但 Codex 登录失败: %s", email)
         return email
 
 
@@ -411,12 +466,12 @@ def _check_pending_invites(chatgpt_api, mail_client):
     if not invites:
         return []
 
-    print(f"\n[Pending] 发现 {len(invites)} 个待处理邀请:")
+    logger.info("[Pending] 发现 %d 个待处理邀请", len(invites))
     completed = []
 
     for inv in invites:
         inv_email = inv.get("email_address", "")
-        print(f"  检查 {inv_email} 是否已收到邮件...")
+        logger.info("[Pending] 检查 %s 是否已收到邮件...", inv_email)
 
         # 从 CloudMail 搜索该邮箱的邀请邮件
         emails = mail_client.search_emails_by_recipient(inv_email, size=5)
@@ -429,10 +484,10 @@ def _check_pending_invites(chatgpt_api, mail_client):
                     break
 
         if not invite_link:
-            print(f"    未收到邮件，跳过")
+            logger.info("[Pending] %s 未收到邮件，跳过", inv_email)
             continue
 
-        print(f"    已收到邀请邮件，继续注册流程...")
+        logger.info("[Pending] %s 已收到邀请邮件，继续注册流程...", inv_email)
 
         # 确保本地有账号记录
         acc = find_account(load_accounts(), inv_email)
@@ -469,7 +524,7 @@ def create_account_direct(mail_client):
     add_account(email, password, cloudmail_account_id=account_id)
 
     # Step 3: 直接去 ChatGPT 注册页面
-    print(f"\n[直接注册] {email}")
+    logger.info("[直接注册] %s", email)
     signup_url = "https://chatgpt.com/auth/login"
 
     with sync_playwright() as p:
@@ -491,7 +546,7 @@ def create_account_direct(mail_client):
             html = page.content()[:2000].lower()
             if "verify you are human" not in html and "challenge" not in page.url:
                 break
-            print(f"  等待 Cloudflare... ({i*5}s)")
+            logger.info("[直接注册] 等待 Cloudflare... (%ds)", i * 5)
             time.sleep(5)
 
         screenshot(page, "direct_01_login_page.png")
@@ -508,7 +563,7 @@ def create_account_direct(mail_client):
         screenshot(page, "direct_02_signup.png")
 
         # 输入邮箱
-        print(f"  输入邮箱: {email}")
+        logger.info("[直接注册] 输入邮箱: %s", email)
         email_input = page.locator('input[name="email"], input[type="email"]').first
         try:
             if email_input.is_visible(timeout=5000):
@@ -525,7 +580,7 @@ def create_account_direct(mail_client):
         pwd_input = page.locator('input[type="password"]').first
         try:
             if pwd_input.is_visible(timeout=5000):
-                print(f"  设置密码: {password}")
+                logger.info("[直接注册] 设置密码")
                 pwd_input.fill(password)
                 time.sleep(0.5)
                 page.locator('button:has-text("Continue"), button:has-text("继续"), button[type="submit"]').first.click()
@@ -546,7 +601,7 @@ def create_account_direct(mail_client):
 
         if code_input:
             import re
-            print(f"  等待验证码...")
+            logger.info("[直接注册] 等待验证码...")
             verification_code = None
             start_t = time.time()
             while time.time() - start_t < MAIL_TIMEOUT:
@@ -564,18 +619,18 @@ def create_account_direct(mail_client):
                 time.sleep(3)
 
             if verification_code:
-                print(f"\n  输入验证码: {verification_code}")
+                logger.info("[直接注册] 输入验证码: %s", verification_code)
                 code_input.fill(verification_code)
                 time.sleep(0.5)
                 page.locator('button:has-text("Continue"), button:has-text("继续"), button[type="submit"]').first.click()
                 time.sleep(8)
             else:
-                print(f"\n  ❌ 未收到验证码")
+                logger.error("[直接注册] 未收到验证码")
                 browser.close()
                 return None
 
         screenshot(page, "direct_05_after_code.png")
-        print(f"  当前 URL: {page.url}")
+        logger.info("[直接注册] 当前 URL: %s", page.url)
 
         # 填写个人信息（全名 + 年龄/生日）
         name_input = page.locator('input[name="name"]').first
@@ -597,13 +652,13 @@ def create_account_direct(mail_client):
                         time.sleep(0.2)
                         page.keyboard.type(val, delay=80)
                         time.sleep(0.3)
-                    print("  填入生日: 1995/06/15")
+                    logger.info("[直接注册] 填入生日: 1995/06/15")
                 else:
                     age_input = page.locator('input[name="age"]').first
                     try:
                         if age_input.is_visible(timeout=3000):
                             age_input.fill("25")
-                            print("  填入年龄: 25")
+                            logger.info("[直接注册] 填入年龄: 25")
                     except Exception:
                         pass
 
@@ -613,7 +668,7 @@ def create_account_direct(mail_client):
             pass
 
         screenshot(page, "direct_06_after_profile.png")
-        print(f"  当前 URL: {page.url}")
+        logger.info("[直接注册] 当前 URL: %s", page.url)
 
         # 可能需要选择 workspace 或自动加入
         try:
@@ -630,9 +685,9 @@ def create_account_direct(mail_client):
         current_url = page.url
         success = "chatgpt.com" in current_url and "auth" not in current_url
         if success:
-            print(f"\n  ✅ 注册成功并已加入 workspace!")
+            logger.info("[直接注册] 注册成功并已加入 workspace!")
         else:
-            print(f"\n  ⚠️  注册可能未完成，URL: {current_url}")
+            logger.warning("[直接注册] 注册可能未完成，URL: %s", current_url)
 
         browser.close()
 
@@ -644,11 +699,11 @@ def create_account_direct(mail_client):
     if bundle:
         auth_file = save_auth_file(bundle)
         update_account(email, status=STATUS_ACTIVE, auth_file=auth_file, last_active_at=time.time())
-        print(f"✅ 账号就绪: {email}")
+        logger.info("[直接注册] 账号就绪: %s", email)
         return email
     else:
         update_account(email, status=STATUS_ACTIVE)
-        print(f"⚠️  账号已加入 Team 但 Codex 登录失败: {email}")
+        logger.warning("[直接注册] 账号已加入 Team 但 Codex 登录失败: %s", email)
         return email
 
 
@@ -659,14 +714,14 @@ def create_new_account(chatgpt_api, mail_client):
     """
     # 先检查 pending invites
     if chatgpt_api and chatgpt_api.browser:
-        print("\n[创建] 先检查 pending invites...")
+        logger.info("[创建] 先检查 pending invites...")
         completed = _check_pending_invites(chatgpt_api, mail_client)
         if completed:
-            print(f"\n从 pending invites 完成了 {len(completed)} 个账号")
+            logger.info("[创建] 从 pending invites 完成了 %d 个账号", len(completed))
             return completed[0]
 
     # 直接注册模式（不需要邀请）
-    print("\n[创建] 使用直接注册模式...")
+    logger.info("[创建] 使用直接注册模式...")
     if chatgpt_api and chatgpt_api.browser:
         chatgpt_api.stop()
     return create_account_direct(mail_client)
@@ -683,7 +738,7 @@ def reinvite_account(chatgpt_api, mail_client, acc):
     email = acc["email"]
     password = acc.get("password", "")
 
-    print(f"\n[轮转] 恢复旧账号: {email}（直接登录）")
+    logger.info("[轮转] 恢复旧账号: %s（直接登录）", email)
 
     # 关闭 ChatGPT API 浏览器避免冲突
     if chatgpt_api and chatgpt_api.browser:
@@ -753,7 +808,7 @@ def reinvite_account(chatgpt_api, mail_client, acc):
 
         if code_input and mail_client:
             import re
-            print("  等待登录验证码...")
+            logger.info("[轮转] 等待登录验证码...")
             otp = None
             start_t = time.time()
             while time.time() - start_t < 120:
@@ -771,14 +826,14 @@ def reinvite_account(chatgpt_api, mail_client, acc):
                     break
                 time.sleep(3)
             if otp:
-                print(f"  输入验证码: {otp}")
+                logger.info("[轮转] 输入验证码: %s", otp)
                 code_input.fill(otp)
                 time.sleep(0.5)
                 page.locator('button:has-text("Continue"), button:has-text("继续"), button[type="submit"]').first.click()
                 time.sleep(5)
 
         screenshot(page, "reinvite_final.png")
-        print(f"  当前 URL: {page.url}")
+        logger.info("[轮转] 当前 URL: %s", page.url)
         browser.close()
 
     # 更新状态
@@ -789,7 +844,7 @@ def reinvite_account(chatgpt_api, mail_client, acc):
     if bundle:
         auth_file = save_auth_file(bundle)
         update_account(email, auth_file=auth_file)
-        print(f"✅ 旧账号已恢复: {email}")
+        logger.info("[轮转] 旧账号已恢复: %s", email)
     else:
         # 尝试用已有的 refresh_token
         auth_file = acc.get("auth_file")
@@ -803,9 +858,9 @@ def reinvite_account(chatgpt_api, mail_client, acc):
                     auth_data["refresh_token"] = new_tokens.get("refresh_token", rt)
                     auth_data["last_refresh"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                     Path(auth_file).write_text(json.dumps(auth_data, indent=2))
-                    print(f"✅ 旧账号已恢复（token 已刷新）: {email}")
+                    logger.info("[轮转] 旧账号已恢复（token 已刷新）: %s", email)
                     return True
-        print(f"⚠️  旧账号已登录但 Codex token 刷新失败: {email}")
+        logger.warning("[轮转] 旧账号已登录但 Codex token 刷新失败: %s", email)
 
     return True
 
@@ -840,10 +895,10 @@ def cmd_rotate(target_seats=5):
             mail_client.login()
         return mail_client
 
-    print("\n[1/5] 同步 Team 状态...")
+    logger.info("[1/5] 同步 Team 状态...")
     sync_account_states()
 
-    print("[2/5] 检查额度...")
+    logger.info("[2/5] 检查额度...")
     exhausted = cmd_check()
 
     try:
@@ -852,7 +907,7 @@ def cmd_rotate(target_seats=5):
         all_exhausted = [a for a in all_accounts if a["status"] == STATUS_EXHAUSTED]
 
         if all_exhausted:
-            print(f"\n[3/5] 移出 {len(all_exhausted)} 个额度用完的账号...")
+            logger.info("[3/5] 移出 %d 个额度用完的账号...", len(all_exhausted))
             ensure_chatgpt()
             for acc in all_exhausted:
                 email = acc["email"]
@@ -860,9 +915,9 @@ def cmd_rotate(target_seats=5):
                     chatgpt.start()
                 if remove_from_team(chatgpt, email):
                     update_account(email, status=STATUS_STANDBY)
-                    print(f"  ✅ {email} → standby")
+                    logger.info("[3/5] %s → standby", email)
         else:
-            print("[3/5] 无需移出账号")
+            logger.info("[3/5] 无需移出账号")
 
         # 检查空缺
         if not chatgpt or not chatgpt.browser:
@@ -871,12 +926,12 @@ def cmd_rotate(target_seats=5):
         vacancies = TARGET - current_count
 
         if vacancies <= 0:
-            print(f"[4/5] Team 已满 ({current_count}/{TARGET})")
+            logger.info("[4/5] Team 已满 (%d/%d)", current_count, TARGET)
             sync_to_cpa()
             _print_status_table(load_accounts())
             return
 
-        print(f"\n[4/5] 填补 {vacancies} 个空缺 (当前 {current_count}/{TARGET})...")
+        logger.info("[4/5] 填补 %d 个空缺 (当前 %d/%d)...", vacancies, current_count, TARGET)
 
         # 优先复用旧账号
         filled = 0
@@ -884,13 +939,13 @@ def cmd_rotate(target_seats=5):
         recovered = [a for a in standby_list if a.get("_quota_recovered")]
 
         if recovered:
-            print(f"  找到 {len(recovered)} 个额度已恢复的旧账号")
+            logger.info("[4/5] 找到 %d 个额度已恢复的旧账号", len(recovered))
 
         for acc in recovered:
             if filled >= vacancies:
                 break
             email = acc["email"]
-            print(f"  ♻️  复用: {email}")
+            logger.info("[4/5] 复用: %s", email)
             if not chatgpt or not chatgpt.browser:
                 ensure_chatgpt()
             reinvite_account(chatgpt, ensure_mail(), acc)
@@ -898,7 +953,7 @@ def cmd_rotate(target_seats=5):
 
         remaining = vacancies - filled
         if remaining <= 0:
-            print(f"  已用旧账号填满空缺")
+            logger.info("[4/5] 已用旧账号填满空缺")
             sync_to_cpa()
             _print_status_table(load_accounts())
             return
@@ -910,20 +965,21 @@ def cmd_rotate(target_seats=5):
         not_recovered = [a for a in standby_list if not a.get("_quota_recovered")]
 
         if not_recovered and active_with_quota:
-            print(f"\n  {len(not_recovered)} 个旧号等恢复中，Team 仍有 {len(active_with_quota)} 个可用，暂不创建")
+            logger.info("[4/5] %d 个旧号等恢复中，Team 仍有 %d 个可用，暂不创建",
+                        len(not_recovered), len(active_with_quota))
             for a in not_recovered:
                 rt = a.get("quota_resets_at")
                 if rt:
                     mins = max(0, int((rt - time.time()) / 60))
-                    print(f"    {a['email']} → {mins} 分钟后恢复")
+                    logger.info("[4/5]   %s → %d 分钟后恢复", a['email'], mins)
             sync_to_cpa()
             _print_status_table(load_accounts())
             return
 
         # 必须创建新号
-        print(f"\n[5/5] 创建 {remaining} 个新账号...")
+        logger.info("[5/5] 创建 %d 个新账号...", remaining)
         for i in range(remaining):
-            print(f"\n  --- 第 {i+1}/{remaining} 个 ---")
+            logger.info("[5/5] 创建第 %d/%d 个...", i + 1, remaining)
             if not chatgpt or not chatgpt.browser:
                 ensure_chatgpt()
             create_new_account(chatgpt, ensure_mail())
@@ -932,7 +988,7 @@ def cmd_rotate(target_seats=5):
         if chatgpt and chatgpt.browser:
             chatgpt.stop()
 
-    print("\n✅ 轮转完成")
+    logger.info("[轮转] 轮转完成")
     sync_to_cpa()
     _print_status_table(load_accounts())
 
@@ -947,10 +1003,10 @@ def cmd_add():
     try:
         result = create_new_account(chatgpt, mail_client)  # 内部会 stop chatgpt
         if result:
-            print(f"\n✅ 新账号添加成功: {result}")
+            logger.info("[添加] 新账号添加成功: %s", result)
             sync_to_cpa()
         else:
-            print(f"\n❌ 添加失败")
+            logger.error("[添加] 添加失败")
     finally:
         if chatgpt.browser:
             chatgpt.stop()
@@ -977,35 +1033,33 @@ def cmd_fill(target=5):
     try:
         current = get_team_member_count(chatgpt)
         if current < 0:
-            print("❌ 获取成员列表失败")
+            logger.error("[填充] 获取成员列表失败")
             return
 
-        print(f"\n当前 Team 成员数: {current}，目标: {target}")
+        logger.info("[填充] 当前 Team 成员数: %d，目标: %d", current, target)
 
         need = target - current
         if need <= 0:
-            print(f"成员数已满足（{current} >= {target}），无需添加")
+            logger.info("[填充] 成员数已满足（%d >= %d），无需添加", current, target)
             return
 
-        print(f"需要添加 {need} 个账号\n")
+        logger.info("[填充] 需要添加 %d 个账号", need)
 
         for i in range(need):
-            print(f"\n{'='*50}")
-            print(f"  添加第 {i+1}/{need} 个账号")
-            print(f"{'='*50}")
+            logger.info("[填充] 添加第 %d/%d 个账号...", i + 1, need)
 
             # 优先复用 standby 中额度已恢复的旧账号
             reusable = get_next_reusable_account()
             if reusable and reusable.get("_quota_recovered"):
                 email = reusable["email"]
-                print(f"复用旧账号: {email}")
+                logger.info("[填充] 复用旧账号: %s", email)
                 # 确保 chatgpt 浏览器可用
                 if not chatgpt.browser:
                     chatgpt.start()
                 reinvite_account(chatgpt, mail_client, reusable)
             else:
                 # 创建新账号
-                print("创建新账号...")
+                logger.info("[填充] 创建新账号...")
                 if not chatgpt.browser:
                     chatgpt.start()
                 create_new_account(chatgpt, mail_client)
@@ -1015,11 +1069,9 @@ def cmd_fill(target=5):
                 chatgpt.start()
             new_count = get_team_member_count(chatgpt)
             if new_count >= 0:
-                print(f"\n当前成员数: {new_count}/{target}")
+                logger.info("[填充] 当前成员数: %d/%d", new_count, target)
 
-        print(f"\n{'='*50}")
-        print(f"  填充完成")
-        print(f"{'='*50}")
+        logger.info("[填充] 填充完成")
         sync_to_cpa()
         cmd_status()
 
@@ -1034,7 +1086,7 @@ def cmd_cleanup(max_seats=None):
     local_emails = {a["email"].lower() for a in accounts}
 
     if not local_emails:
-        print("本地无管理的账号，无需清理")
+        logger.info("[清理] 本地无管理的账号，无需清理")
         return
 
     chatgpt = ChatGPTTeamAPI()
@@ -1046,14 +1098,14 @@ def cmd_cleanup(max_seats=None):
         result = chatgpt._api_fetch("GET", path)
 
         if result["status"] != 200:
-            print(f"❌ 获取成员列表失败: {result['status']}")
+            logger.error("[清理] 获取成员列表失败: %d", result['status'])
             return
 
         data = json.loads(result["body"])
         members = data.get("items", data.get("users", data.get("members", [])))
 
         total = len(members)
-        print(f"\n当前 Team 成员数: {total}")
+        logger.info("[清理] 当前 Team 成员数: %d", total)
 
         # 区分：本地管理的 vs 手动添加的
         local_members = []
@@ -1065,19 +1117,19 @@ def cmd_cleanup(max_seats=None):
             else:
                 external_members.append(m)
 
-        print(f"  手动添加的成员: {len(external_members)}")
+        logger.info("[清理] 手动添加的成员: %d", len(external_members))
         for m in external_members:
-            print(f"    {m.get('email'):<45} ({m.get('role')})")
-        print(f"  本地管理的成员: {len(local_members)}")
+            logger.info("[清理]   %s (%s)", m.get('email'), m.get('role'))
+        logger.info("[清理] 本地管理的成员: %d", len(local_members))
         for m in local_members:
-            print(f"    {m.get('email'):<45} ({m.get('role')})")
+            logger.info("[清理]   %s (%s)", m.get('email'), m.get('role'))
 
         # 确定要移除的数量
         if max_seats is None:
             max_seats = len(external_members) + 2  # 保留外部成员 + 2 个本地席位
         to_remove_count = total - max_seats
         if to_remove_count <= 0:
-            print(f"\n成员数 {total} 未超过上限 {max_seats}，无需清理")
+            logger.info("[清理] 成员数 %d 未超过上限 %d，无需清理", total, max_seats)
             return
 
         # 从本地管理的账号中选择要移除的（优先移除额度已用完的）
@@ -1091,9 +1143,9 @@ def cmd_cleanup(max_seats=None):
         ))
 
         to_remove = removable[:to_remove_count]
-        print(f"\n需要移除 {len(to_remove)} 个本地账号:")
+        logger.info("[清理] 需要移除 %d 个本地账号:", len(to_remove))
         for m in to_remove:
-            print(f"  {m.get('email')}")
+            logger.info("[清理]   %s", m.get('email'))
 
         # 执行移除
         for m in to_remove:
@@ -1104,10 +1156,10 @@ def cmd_cleanup(max_seats=None):
             result = chatgpt._api_fetch("DELETE", delete_path)
 
             if result["status"] in (200, 204):
-                print(f"  ✅ 已移除 {email}")
+                logger.info("[清理] 已移除 %s", email)
                 update_account(email, status=STATUS_STANDBY)
             else:
-                print(f"  ❌ 移除 {email} 失败: {result['status']}")
+                logger.error("[清理] 移除 %s 失败: %d", email, result['status'])
 
         # 取消 pending invites 中本地管理的
         inv_result = chatgpt._api_fetch("GET", f"/backend-api/accounts/{CHATGPT_ACCOUNT_ID}/invites")
@@ -1121,9 +1173,9 @@ def cmd_cleanup(max_seats=None):
                     del_result = chatgpt._api_fetch("DELETE",
                         f"/backend-api/accounts/{CHATGPT_ACCOUNT_ID}/invites/{inv_id}")
                     if del_result["status"] in (200, 204):
-                        print(f"  ✅ 已取消邀请 {inv_email}")
+                        logger.info("[清理] 已取消邀请 %s", inv_email)
 
-        print(f"\n清理完成")
+        logger.info("[清理] 清理完成")
         sync_to_cpa()
 
     finally:

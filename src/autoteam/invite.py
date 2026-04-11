@@ -18,11 +18,14 @@ ChatGPT Team 自动邀请 + 注册工具
 
 import sys
 import os
+import logging
 import time
 import re
 from autoteam.cloudmail import CloudMailClient
 from autoteam.chatgpt_api import ChatGPTTeamAPI
 from playwright.sync_api import sync_playwright
+
+logger = logging.getLogger(__name__)
 
 MAIL_TIMEOUT = int(os.environ.get("MAIL_TIMEOUT", "180"))
 SCREENSHOT_DIR = "screenshots"
@@ -32,7 +35,7 @@ def screenshot(page, name):
     os.makedirs(SCREENSHOT_DIR, exist_ok=True)
     path = f"{SCREENSHOT_DIR}/{name}"
     page.screenshot(path=path, full_page=True)
-    print(f"  [截图] {path}")
+    logger.debug("[截图] %s", path)
 
 
 def find_and_click(page, selectors, label="元素", timeout=3000):
@@ -40,7 +43,7 @@ def find_and_click(page, selectors, label="元素", timeout=3000):
         try:
             loc = page.locator(sel).first
             if loc.is_visible(timeout=timeout):
-                print(f"  找到{label}: {sel}")
+                logger.debug("[注册] 找到%s: %s", label, sel)
                 loc.click()
                 return True
         except Exception:
@@ -53,7 +56,7 @@ def find_visible(page, selectors, label="元素", timeout=3000):
         try:
             loc = page.locator(sel).first
             if loc.is_visible(timeout=timeout):
-                print(f"  找到{label}: {sel}")
+                logger.debug("[注册] 找到%s: %s", label, sel)
                 return loc
         except Exception:
             continue
@@ -65,7 +68,7 @@ def wait_for_cloudflare(page, max_wait=60):
         html = page.content()[:2000].lower()
         if "verify you are human" not in html and "challenge" not in page.url:
             return True
-        print(f"  等待 Cloudflare... ({i*5}s)")
+        logger.info("[注册] 等待 Cloudflare... (%ds)", i * 5)
         time.sleep(5)
     return False
 
@@ -73,12 +76,12 @@ def wait_for_cloudflare(page, max_wait=60):
 def register_with_invite(page, invite_link, email, mail_client, password=None):
     """用邀请链接注册 ChatGPT 账号并加入 workspace，返回 (success, password)"""
 
-    print(f"\n[注册] 打开邀请链接...")
+    logger.info("[注册] 打开邀请链接...")
     page.goto(invite_link, wait_until="domcontentloaded", timeout=60000)
     time.sleep(5)
     wait_for_cloudflare(page)
     screenshot(page, "reg_01_invite_page.png")
-    print(f"  当前 URL: {page.url}")
+    logger.info("[注册] 当前 URL: %s", page.url)
 
     # 可能需要点击 Sign up
     find_and_click(page, [
@@ -92,7 +95,7 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
     screenshot(page, "reg_02_signup.png")
 
     # 输入邮箱
-    print(f"[注册] 输入邮箱: {email}")
+    logger.info("[注册] 输入邮箱: %s", email)
     email_input = find_visible(page, [
         'input[name="email"]',
         'input[type="email"]',
@@ -115,7 +118,7 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
         time.sleep(5)
         screenshot(page, "reg_03_after_email.png")
     else:
-        print("  未找到邮箱输入框，可能页面已自动填入")
+        logger.info("[注册] 未找到邮箱输入框，可能页面已自动填入")
         screenshot(page, "reg_03_no_email_input.png")
 
     # 可能需要输入密码（注册流程）
@@ -129,7 +132,7 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
         if not password:
             import uuid
             password = f"Tmp_{uuid.uuid4().hex[:12]}!"
-        print(f"[注册] 设置密码: {password}")
+        logger.info("[注册] 设置密码: %s", password)
         pwd_input.fill(password)
         time.sleep(1)
 
@@ -142,7 +145,7 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
         screenshot(page, "reg_04_after_password.png")
 
     # 等待验证码邮件
-    print(f"\n[注册] 等待 ChatGPT 发送验证码到 {email}...")
+    logger.info("[注册] 等待 ChatGPT 发送验证码到 %s...", email)
     verification_code = None
     try:
         # 搜索来自 OpenAI 的验证码邮件（不是邀请邮件）
@@ -161,7 +164,7 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
                     code_match = re.search(r'\b(\d{6})\b', text)
                     if code_match:
                         verification_code = code_match.group(1)
-                        print(f"\n[CloudMail] 收到验证码: {verification_code}")
+                        logger.info("[CloudMail] 收到验证码: %s", verification_code)
                         break
             if verification_code:
                 break
@@ -169,21 +172,21 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
             print(f"\r[CloudMail] 等待验证码... ({elapsed}s)", end="", flush=True)
             time.sleep(3)
     except Exception as e:
-        print(f"\n等待验证码异常: {e}")
+        logger.error("[注册] 等待验证码异常: %s", e)
 
     if not verification_code:
-        print(f"\n未自动获取到验证码")
+        logger.warning("[注册] 未自动获取到验证码")
         screenshot(page, "reg_05_no_code.png")
         return False, password
 
     # 输入验证码
-    print(f"[注册] 输入验证码: {verification_code}")
+    logger.info("[注册] 输入验证码: %s", verification_code)
     screenshot(page, "reg_05_before_code.png")
 
     # 检查是否是多个单字符输入框
     single_inputs = page.locator('input[maxlength="1"]').all()
     if len(single_inputs) >= 4:
-        print(f"  检测到 {len(single_inputs)} 个单字符输入框")
+        logger.debug("[注册] 检测到 %d 个单字符输入框", len(single_inputs))
         for i, char in enumerate(verification_code):
             if i < len(single_inputs):
                 single_inputs[i].fill(char)
@@ -199,7 +202,7 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
         if code_input:
             code_input.fill(verification_code)
         else:
-            print("  未找到验证码输入框")
+            logger.warning("[注册] 未找到验证码输入框")
             screenshot(page, "reg_05_no_code_input.png")
             return False, password
 
@@ -215,7 +218,7 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
 
     time.sleep(8)
     screenshot(page, "reg_06_after_code.png")
-    print(f"  当前 URL: {page.url}")
+    logger.info("[注册] 当前 URL: %s", page.url)
 
     # 填写个人信息（全名 + 生日/年龄）
     name_input = find_visible(page, [
@@ -244,7 +247,7 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
             time.sleep(0.2)
             page.keyboard.type(val, delay=80)
             time.sleep(0.3)
-        print("  填入生日: 1995/06/15 (spinbutton)")
+        logger.info("[注册] 填入生日: 1995/06/15 (spinbutton)")
         filled_age = True
     else:
         # 类型 B：普通年龄数字输入框
@@ -257,7 +260,7 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
         ], "年龄输入框", timeout=3000)
         if age_input:
             age_input.fill("25")
-            print("  填入年龄: 25")
+            logger.info("[注册] 填入年龄: 25")
             filled_age = True
 
     if name_input or filled_age:
@@ -288,13 +291,13 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
     page_text = page.inner_text("body")[:500].lower()
 
     if "chatgpt.com" in current_url and "auth" not in current_url:
-        print(f"\n✅ 注册成功并已加入 workspace!")
+        logger.info("[注册] 注册成功并已加入 workspace!")
         return True, password
     elif "workspace" in page_text or "welcome" in page_text:
-        print(f"\n✅ 已加入 workspace!")
+        logger.info("[注册] 已加入 workspace!")
         return True, password
     else:
-        print(f"\n⚠️  注册流程可能未完成，请查看截图")
+        logger.warning("[注册] 注册流程可能未完成，请查看截图")
         return False, password
 
 
@@ -308,7 +311,7 @@ def run():
         mail_client = CloudMailClient()
         mail_client.login()
         account_id, email = mail_client.create_temp_email()
-        print(f"\n临时邮箱: {email}")
+        logger.info("[邀请] 临时邮箱: %s", email)
 
         # Step 2: 发送 Team 邀请
         chatgpt = ChatGPTTeamAPI()
@@ -316,12 +319,12 @@ def run():
         status, data = chatgpt.invite_member(email)
 
         if status != 200:
-            print(f"\n❌ 邀请失败 (HTTP {status})")
+            logger.error("[邀请] 邀请失败 (HTTP %d)", status)
             return False
-        print(f"\n✅ 邀请已发送")
+        logger.info("[邀请] 邀请已发送")
 
         # Step 3: 等待邀请邮件
-        print(f"\n等待邀请邮件...")
+        logger.info("[邀请] 等待邀请邮件...")
         invite_link = None
         try:
             email_data = mail_client.wait_for_email(
@@ -331,23 +334,21 @@ def run():
             )
             invite_link = mail_client.extract_invite_link(email_data)
         except TimeoutError:
-            print(f"\n⏰ 等待邀请邮件超时")
+            logger.error("[邀请] 等待邀请邮件超时")
         except Exception as e:
-            print(f"\n❌ 获取邀请邮件失败: {e}")
+            logger.error("[邀请] 获取邀请邮件失败: %s", e)
 
         if not invite_link:
-            print("❌ 未获取到邀请链接")
+            logger.error("[邀请] 未获取到邀请链接")
             return False
 
-        print(f"\n邀请链接: {invite_link}")
+        logger.info("[邀请] 邀请链接: %s", invite_link)
 
         # Step 4: 关闭 ChatGPT API 浏览器，开新浏览器做注册
         chatgpt.stop()
         chatgpt = None
 
-        print(f"\n{'='*50}")
-        print(f"  开始注册 ChatGPT 账号")
-        print(f"{'='*50}")
+        logger.info("[邀请] 开始注册 ChatGPT 账号")
 
         with sync_playwright() as p:
             browser = p.chromium.launch(
@@ -366,13 +367,9 @@ def run():
             browser.close()
 
         if result:
-            print(f"\n{'='*50}")
-            print(f"  ✅ 成功！{email} 已注册并加入 ChatGPT Team")
-            print(f"{'='*50}")
+            logger.info("[邀请] %s 已注册并加入 ChatGPT Team", email)
         else:
-            print(f"\n{'='*50}")
-            print(f"  ❌ 流程未完成，请查看 screenshots/ 目录")
-            print(f"{'='*50}")
+            logger.error("[邀请] 流程未完成，请查看 screenshots/ 目录")
 
         return result
 
@@ -381,14 +378,11 @@ def run():
             chatgpt.stop()
         # 不删除临时邮箱，保留账号
         if mail_client and account_id:
-            print(f"\n临时邮箱保留: {email} (accountId={account_id})")
+            logger.info("[邀请] 临时邮箱保留: %s (accountId=%s)", email, account_id)
 
 
 def main():
-    print("=" * 50)
-    print("  ChatGPT Team 自动邀请 + 注册工具")
-    print("=" * 50)
-
+    logger.info("ChatGPT Team 自动邀请 + 注册工具")
     result = run()
     sys.exit(0 if result else 1)
 

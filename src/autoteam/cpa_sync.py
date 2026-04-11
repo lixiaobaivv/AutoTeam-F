@@ -1,9 +1,12 @@
 """CPA (CLIProxyAPI) 认证文件同步 - 保持本地 codex 认证文件与 CPA 一致"""
 
 import json
+import logging
 import requests
 from pathlib import Path
 from autoteam.config import CPA_URL, CPA_KEY
+
+logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 AUTH_DIR = PROJECT_ROOT / "auths"
@@ -17,7 +20,7 @@ def list_cpa_files():
     """获取 CPA 中所有认证文件"""
     resp = requests.get(f"{CPA_URL}/v0/management/auth-files", headers=_headers(), timeout=10)
     if resp.status_code != 200:
-        print(f"[CPA] 获取文件列表失败: {resp.status_code}")
+        logger.error("[CPA] 获取文件列表失败: %d", resp.status_code)
         return []
     data = resp.json()
     return data.get("files", [])
@@ -27,7 +30,7 @@ def upload_to_cpa(filepath):
     """上传认证文件到 CPA"""
     filepath = Path(filepath)
     if not filepath.exists():
-        print(f"[CPA] 文件不存在: {filepath}")
+        logger.warning("[CPA] 文件不存在: %s", filepath)
         return False
 
     with open(filepath, "rb") as f:
@@ -39,10 +42,10 @@ def upload_to_cpa(filepath):
         )
 
     if resp.status_code == 200:
-        print(f"[CPA] ✅ 已上传: {filepath.name}")
+        logger.info("[CPA] 已上传: %s", filepath.name)
         return True
     else:
-        print(f"[CPA] ❌ 上传失败: {resp.status_code} {resp.text[:200]}")
+        logger.error("[CPA] 上传失败: %d %s", resp.status_code, resp.text[:200])
         return False
 
 
@@ -55,10 +58,10 @@ def delete_from_cpa(name):
         timeout=10,
     )
     if resp.status_code == 200:
-        print(f"[CPA] ✅ 已删除: {name}")
+        logger.info("[CPA] 已删除: %s", name)
         return True
     else:
-        print(f"[CPA] ❌ 删除失败: {resp.status_code} {resp.text[:200]}")
+        logger.error("[CPA] 删除失败: %d %s", resp.status_code, resp.text[:200])
         return False
 
 
@@ -97,14 +100,13 @@ def sync_to_cpa():
     cpa_files = list_cpa_files()
     cpa_names = {f["name"]: f for f in cpa_files}
 
-    print(f"\nactive 认证文件: {len(active_files)}")
-    print(f"CPA  认证文件: {len(cpa_files)}")
+    logger.info("[CPA] active 认证文件: %d, CPA 认证文件: %d", len(active_files), len(cpa_files))
 
     # 上传：active 有但 CPA 没有
     uploaded = 0
     for name, path in active_files.items():
         if name not in cpa_names:
-            print(f"\n上传: {name}")
+            logger.info("[CPA] 上传: %s", name)
             if upload_to_cpa(path):
                 uploaded += 1
 
@@ -113,14 +115,13 @@ def sync_to_cpa():
     for name, cpa_file in cpa_names.items():
         email = cpa_file.get("email", "").lower()
         if email in local_emails and name not in active_files:
-            print(f"\n删除非 active 文件: {name} ({email})")
+            logger.info("[CPA] 删除非 active 文件: %s (%s)", name, email)
             if delete_from_cpa(name):
                 deleted += 1
 
-    print(f"\n同步完成: 上传 {uploaded}, 删除 {deleted}")
+    logger.info("[CPA] 同步完成: 上传 %d, 删除 %d", uploaded, deleted)
 
     # 最终状态
     final_cpa = list_cpa_files()
     final_local_managed = [f for f in final_cpa if f.get("email", "").lower() in local_emails]
-    print(f"CPA 中本地管理的认证文件: {len(final_local_managed)}")
-    print(f"本地 active 认证文件: {len(active_files)}")
+    logger.info("[CPA] CPA 中本地管理: %d, 本地 active: %d", len(final_local_managed), len(active_files))

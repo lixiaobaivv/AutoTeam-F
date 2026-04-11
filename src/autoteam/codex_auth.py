@@ -3,6 +3,7 @@ import autoteam.display  # noqa: F401
 
 import json
 import hashlib
+import logging
 import time
 import base64
 import os
@@ -10,6 +11,8 @@ import secrets
 import urllib.parse
 from pathlib import Path
 from playwright.sync_api import sync_playwright
+
+logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 AUTH_DIR = PROJECT_ROOT / "auths"
@@ -75,7 +78,7 @@ def login_codex_via_browser(email, password, mail_client=None):
     }
     auth_url = f"{CODEX_AUTH_URL}?{urllib.parse.urlencode(params)}"
 
-    print(f"[Codex] 开始 OAuth 登录: {email}")
+    logger.info("[Codex] 开始 OAuth 登录: %s", email)
 
     auth_code = None
 
@@ -90,7 +93,7 @@ def login_codex_via_browser(email, password, mail_client=None):
         )
 
         # === Step 0: 先登录 ChatGPT 并切换到 Team workspace ===
-        print("[Codex] 先登录 ChatGPT 选择 Team workspace...")
+        logger.info("[Codex] 先登录 ChatGPT 选择 Team workspace...")
         _page = context.new_page()
         _page.goto("https://chatgpt.com/auth/login", wait_until="domcontentloaded", timeout=60000)
         time.sleep(5)
@@ -135,7 +138,7 @@ def login_codex_via_browser(email, password, mail_client=None):
             ci = _page.locator('input[name="code"]').first
             if ci.is_visible(timeout=5000) and mail_client:
                 import re as _re2
-                print("[Codex] ChatGPT 登录需要验证码...")
+                logger.info("[Codex] ChatGPT 登录需要验证码...")
                 otp = None
                 t0 = time.time()
                 while time.time() - t0 < 120:
@@ -157,15 +160,15 @@ def login_codex_via_browser(email, password, mail_client=None):
             pass
 
         _screenshot(_page, "codex_00_chatgpt_login.png")
-        print(f"[Codex] ChatGPT 登录后 URL: {_page.url}")
+        logger.info("[Codex] ChatGPT 登录后 URL: %s", _page.url)
 
         # 如果是 workspace 选择页面，选择 Team
         if "workspace" in _page.url:
-            print("[Codex] 检测到 workspace 选择页面...")
+            logger.info("[Codex] 检测到 workspace 选择页面...")
             try:
                 ws_btn = _page.locator(f'text="{CHATGPT_WORKSPACE_NAME}"').first
                 if CHATGPT_WORKSPACE_NAME and ws_btn.is_visible(timeout=3000):
-                    print(f"[Codex] 选择 workspace: {CHATGPT_WORKSPACE_NAME}")
+                    logger.info("[Codex] 选择 workspace: %s", CHATGPT_WORKSPACE_NAME)
                     ws_btn.click()
                     time.sleep(5)
                 else:
@@ -175,7 +178,7 @@ def login_codex_via_browser(email, password, mail_client=None):
                         try:
                             text = opt.inner_text(timeout=1000).strip()
                             if text and "个人" not in text and "Personal" not in text and text not in ("ChatGPT", ""):
-                                print(f"[Codex] 选择 workspace: {text}")
+                                logger.info("[Codex] 选择 workspace: %s", text)
                                 opt.click()
                                 time.sleep(5)
                                 break
@@ -184,7 +187,7 @@ def login_codex_via_browser(email, password, mail_client=None):
             except Exception:
                 pass
             _screenshot(_page, "codex_00_after_workspace.png")
-            print(f"[Codex] 选择 workspace 后 URL: {_page.url}")
+            logger.info("[Codex] 选择 workspace 后 URL: %s", _page.url)
 
         # 确保 _account cookie 设置为 Team account ID
         if CHATGPT_ACCOUNT_ID:
@@ -203,7 +206,7 @@ def login_codex_via_browser(email, password, mail_client=None):
                 "secure": True,
                 "sameSite": "Lax",
             }])
-            print(f"[Codex] 已设置 _account cookie = {CHATGPT_ACCOUNT_ID}")
+            logger.debug("[Codex] 已设置 _account cookie = %s", CHATGPT_ACCOUNT_ID)
 
         # 关闭 ChatGPT 页面但保留 context
         _page.close()
@@ -217,7 +220,7 @@ def login_codex_via_browser(email, password, mail_client=None):
                 qs = urllib.parse.parse_qs(parsed.query)
                 auth_code = qs.get("code", [None])[0]
                 if auth_code:
-                    print(f"[Codex] 捕获到 auth code!")
+                    logger.info("[Codex] 捕获到 auth code!")
 
         # 也监听 response/framenavigated 来捕获 redirect URL
         def on_response(response):
@@ -228,7 +231,7 @@ def login_codex_via_browser(email, password, mail_client=None):
                 qs = urllib.parse.parse_qs(parsed.query)
                 auth_code = qs.get("code", [None])[0]
                 if auth_code:
-                    print(f"[Codex] 从 response 捕获到 auth code!")
+                    logger.info("[Codex] 从 response 捕获到 auth code!")
 
         page = context.new_page()
         page.on("request", on_request)
@@ -273,7 +276,7 @@ def login_codex_via_browser(email, password, mail_client=None):
             code_input = None
 
         if code_input and mail_client:
-            print("[Codex] 需要登录验证码，从 CloudMail 获取...")
+            logger.info("[Codex] 需要登录验证码，从 CloudMail 获取...")
             import re as _re
             start_t = time.time()
             otp_code = None
@@ -293,20 +296,20 @@ def login_codex_via_browser(email, password, mail_client=None):
                 time.sleep(3)
 
             if otp_code:
-                print(f"[Codex] 获取到验证码: {otp_code}")
+                logger.info("[Codex] 获取到验证码: %s", otp_code)
                 code_input.fill(otp_code)
                 time.sleep(0.5)
                 page.locator('button:has-text("Continue"), button:has-text("继续"), button[type="submit"]').first.click()
                 time.sleep(5)
                 _screenshot(page, "codex_03c_after_otp.png")
             else:
-                print("[Codex] 未获取到验证码")
+                logger.warning("[Codex] 未获取到验证码")
         elif code_input:
-            print("[Codex] 需要验证码但无 mail_client，无法自动获取")
+            logger.warning("[Codex] 需要验证码但无 mail_client，无法自动获取")
 
         # 处理 about-you 页面（可能出现在 OAuth 流程中）
         if "about-you" in page.url:
-            print("[Codex] 检测到 about-you 页面，填写个人信息...")
+            logger.info("[Codex] 检测到 about-you 页面，填写个人信息...")
             try:
                 name_input = page.locator('input[name="name"]').first
                 if name_input.is_visible(timeout=3000):
@@ -326,24 +329,24 @@ def login_codex_via_browser(email, password, mail_client=None):
                         time.sleep(0.2)
                         page.keyboard.type(val, delay=80)
                         time.sleep(0.3)
-                    print("  填入生日: 1995/06/15 (spinbutton)")
+                    logger.info("[Codex] 填入生日: 1995/06/15 (spinbutton)")
                 else:
                     # 类型 B：普通年龄数字输入框
                     age_input = page.locator('input[name="age"], input[placeholder*="年龄"]').first
                     try:
                         if age_input.is_visible(timeout=3000):
                             age_input.fill("25")
-                            print("  填入年龄: 25")
+                            logger.info("[Codex] 填入年龄: 25")
                     except Exception:
-                        print("  未找到年龄/生日输入框")
+                        logger.warning("[Codex] 未找到年龄/生日输入框")
 
                 time.sleep(0.5)
                 page.locator('button:has-text("继续"), button:has-text("Continue"), button:has-text("完成帐户创建"), button[type="submit"]').first.click()
                 time.sleep(5)
                 _screenshot(page, "codex_03d_after_aboutyou.png")
-                print(f"[Codex] about-you 完成，当前 URL: {page.url}")
+                logger.info("[Codex] about-you 完成，当前 URL: %s", page.url)
             except Exception as e:
-                print(f"[Codex] about-you 处理失败: {e}")
+                logger.error("[Codex] about-you 处理失败: %s", e)
 
         # 处理多个授权/同意页面（可能有多步）
         for step in range(10):
@@ -364,7 +367,7 @@ def login_codex_via_browser(email, password, mail_client=None):
                         if ws_btn.is_visible(timeout=2000):
                             ws_btn.click()
                             time.sleep(1)
-                            print(f"[Codex] 已选择 workspace: {CHATGPT_WORKSPACE_NAME} (step {step+1})")
+                            logger.info("[Codex] 已选择 workspace: %s (step %d)", CHATGPT_WORKSPACE_NAME, step + 1)
                     except Exception:
                         pass
 
@@ -379,7 +382,7 @@ def login_codex_via_browser(email, password, mail_client=None):
                             text = opt.inner_text(timeout=1000).strip()
                             if text and "新组织" not in text and "New" not in text:
                                 opt.click()
-                                print(f"[Codex] 选择已有组织: {text}")
+                                logger.info("[Codex] 选择已有组织: %s", text)
                                 break
                         else:
                             if options:
@@ -393,7 +396,7 @@ def login_codex_via_browser(email, password, mail_client=None):
                 otp_input = page.locator('input[name="code"], input[inputmode="numeric"]').first
                 if otp_input.is_visible(timeout=2000) and mail_client:
                     import re as _re3
-                    print(f"[Codex] 需要邮箱验证码 (step {step+1})...")
+                    logger.info("[Codex] 需要邮箱验证码 (step %d)...", step + 1)
                     otp = None
                     t0 = time.time()
                     while time.time() - t0 < 120:
@@ -411,7 +414,7 @@ def login_codex_via_browser(email, password, mail_client=None):
                         time.sleep(0.5)
                         page.locator('button[type="submit"], button:has-text("Continue"), button:has-text("继续")').first.click()
                         time.sleep(5)
-                        print(f"[Codex] 已输入验证码: {otp}")
+                        logger.info("[Codex] 已输入验证码: %s", otp)
                         continue  # 重新循环检查下一个页面
             except Exception:
                 pass
@@ -419,7 +422,7 @@ def login_codex_via_browser(email, password, mail_client=None):
             try:
                 consent_btn = page.locator('button:has-text("继续"), button:has-text("Continue"), button:has-text("Allow")').first
                 if consent_btn.is_visible(timeout=5000):
-                    print(f"[Codex] 点击同意/继续按钮 (step {step+1})...")
+                    logger.info("[Codex] 点击同意/继续按钮 (step %d)...", step + 1)
                     consent_btn.click()
                     time.sleep(5)
                     _screenshot(page, f"codex_04_consent_{step+1}.png")
@@ -440,7 +443,7 @@ def login_codex_via_browser(email, password, mail_client=None):
                     qs = urllib.parse.parse_qs(parsed.query)
                     auth_code = qs.get("code", [None])[0]
                     if auth_code:
-                        print(f"[Codex] 从 URL 捕获到 auth code!")
+                        logger.info("[Codex] 从 URL 捕获到 auth code!")
                         break
             except Exception:
                 pass
@@ -448,15 +451,15 @@ def login_codex_via_browser(email, password, mail_client=None):
 
         if not auth_code:
             _screenshot(page, "codex_05_no_callback.png")
-            print(f"[Codex] 未获取到 auth code，当前 URL: {page.url}")
+            logger.warning("[Codex] 未获取到 auth code，当前 URL: %s", page.url)
 
         browser.close()
 
     if not auth_code:
-        print("[Codex] OAuth 登录失败：未获取到 authorization code")
+        logger.error("[Codex] OAuth 登录失败: 未获取到 authorization code")
         return None
 
-    print(f"[Codex] 获取到 auth code，交换 token...")
+    logger.info("[Codex] 获取到 auth code，交换 token...")
 
     # 用 auth code 换 token
     import requests
@@ -469,7 +472,7 @@ def login_codex_via_browser(email, password, mail_client=None):
     }, headers={"Content-Type": "application/x-www-form-urlencoded"})
 
     if resp.status_code != 200:
-        print(f"[Codex] Token 交换失败: {resp.status_code} {resp.text[:200]}")
+        logger.error("[Codex] Token 交换失败: %d %s", resp.status_code, resp.text[:200])
         return None
 
     token_data = resp.json()
@@ -487,7 +490,7 @@ def login_codex_via_browser(email, password, mail_client=None):
         "expired": time.time() + token_data.get("expires_in", 3600),
     }
 
-    print(f"[Codex] 登录成功: {bundle['email']} (plan: {bundle['plan_type']})")
+    logger.info("[Codex] 登录成功: %s (plan: %s)", bundle['email'], bundle['plan_type'])
     return bundle
 
 
@@ -503,7 +506,7 @@ def save_auth_file(bundle):
     # 清理同一邮箱的旧文件（避免 free/team 并存）
     for old in AUTH_DIR.glob(f"codex-{email}-*.json"):
         old.unlink()
-        print(f"[Codex] 清理旧文件: {old.name}")
+        logger.info("[Codex] 清理旧文件: %s", old.name)
 
     filename = f"codex-{email}-{plan_type}-{hash_id}.json"
     filepath = AUTH_DIR / filename
@@ -522,7 +525,7 @@ def save_auth_file(bundle):
     filepath.write_text(json.dumps(auth_data, indent=2))
     os.chmod(filepath, 0o600)
 
-    print(f"[Codex] 认证文件已保存: {filepath}")
+    logger.info("[Codex] 认证文件已保存: %s", filepath)
     return str(filepath)
 
 
@@ -552,14 +555,14 @@ def check_codex_quota(access_token, account_id=None):
             timeout=30,
         )
     except Exception as e:
-        print(f"[Codex] 请求异常: {e}")
+        logger.error("[Codex] 请求异常: %s", e)
         return "auth_error", None
 
     if resp.status_code in (401, 403):
         return "auth_error", None
 
     if resp.status_code != 200:
-        print(f"[Codex] wham/usage 异常: {resp.status_code} {resp.text[:200]}")
+        logger.error("[Codex] wham/usage 异常: %d %s", resp.status_code, resp.text[:200])
         return "auth_error", None
 
     try:
@@ -597,7 +600,7 @@ def refresh_access_token(refresh_token):
     }, headers={"Content-Type": "application/x-www-form-urlencoded"})
 
     if resp.status_code != 200:
-        print(f"[Codex] Token 刷新失败: {resp.status_code}")
+        logger.error("[Codex] Token 刷新失败: %d", resp.status_code)
         return None
 
     data = resp.json()

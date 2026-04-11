@@ -1,5 +1,6 @@
 """CloudMail API 客户端 - 管理临时邮箱和读取邮件"""
 
+import logging
 import re
 import time
 import uuid
@@ -8,6 +9,8 @@ from autoteam.config import (
     CLOUDMAIL_BASE_URL, CLOUDMAIL_EMAIL, CLOUDMAIL_PASSWORD,
     CLOUDMAIL_DOMAIN, EMAIL_POLL_INTERVAL, EMAIL_POLL_TIMEOUT,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class CloudMailClient:
@@ -43,7 +46,7 @@ class CloudMailClient:
         if resp["code"] != 200:
             raise Exception(f"CloudMail 登录失败: {resp.get('message')}")
         self.token = resp["data"]["token"]
-        print(f"[CloudMail] 登录成功")
+        logger.info("[CloudMail] 登录成功")
         return self.token
 
     def create_temp_email(self, prefix=None):
@@ -57,7 +60,7 @@ class CloudMailClient:
             raise Exception(f"创建邮箱失败: {resp.get('message')}")
 
         account_id = resp["data"]["accountId"]
-        print(f"[CloudMail] 临时邮箱已创建: {email} (accountId={account_id})")
+        logger.info("[CloudMail] 临时邮箱已创建: %s (accountId=%s)", email, account_id)
         return account_id, email
 
     def search_emails_by_recipient(self, to_email, size=10):
@@ -88,7 +91,7 @@ class CloudMailClient:
     def wait_for_email(self, to_email, timeout=None, sender_keyword=None):
         """轮询等待邮件到达（用 admin API 按收件人搜索）"""
         timeout = timeout or EMAIL_POLL_TIMEOUT
-        print(f"[CloudMail] 等待邮件到达 {to_email}... (超时 {timeout}s)")
+        logger.info("[CloudMail] 等待邮件到达 %s... (超时 %ds)", to_email, timeout)
         start = time.time()
 
         while time.time() - start < timeout:
@@ -99,7 +102,7 @@ class CloudMailClient:
                 if sender_keyword and sender_keyword.lower() not in sender.lower():
                     continue
                 subject = email.get("subject", "")
-                print(f"\n[CloudMail] 收到邮件: {subject} (from: {sender})")
+                logger.info("[CloudMail] 收到邮件: %s (from: %s)", subject, sender)
                 return email
 
             elapsed = int(time.time() - start)
@@ -118,14 +121,14 @@ class CloudMailClient:
         links = re.findall(r'href="(https://chatgpt\.com/auth/login\?[^"]*)"', html)
         if links:
             link = links[0]
-            print(f"[CloudMail] 提取到邀请链接: {link[:80]}...")
+            logger.info("[CloudMail] 提取到邀请链接: %s...", link[:80])
             return link
 
         # 从纯文本中提取
         links = re.findall(r'(https://chatgpt\.com/auth/login\?[^\s<>"\']+)', text)
         if links:
             link = links[0]
-            print(f"[CloudMail] 提取到邀请链接: {link[:80]}...")
+            logger.info("[CloudMail] 提取到邀请链接: %s...", link[:80])
             return link
 
         # 通用链接提取
@@ -133,7 +136,7 @@ class CloudMailClient:
         match = re.search(link_pattern, html or text, re.IGNORECASE)
         if match:
             link = match.group(0)
-            print(f"[CloudMail] 提取到链接: {link[:80]}...")
+            logger.info("[CloudMail] 提取到链接: %s...", link[:80])
             return link
 
         return None
@@ -142,5 +145,5 @@ class CloudMailClient:
         """删除临时邮箱账户"""
         resp = self._delete("/account/delete", {"accountId": account_id})
         if resp["code"] == 200:
-            print(f"[CloudMail] 临时邮箱已删除 (accountId={account_id})")
+            logger.info("[CloudMail] 临时邮箱已删除 (accountId=%s)", account_id)
         return resp
