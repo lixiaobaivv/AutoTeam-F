@@ -918,6 +918,10 @@ def start_server(host: str = "0.0.0.0", port: int = 8787):
 
     # 过滤轮询日志，避免刷屏
     logging.getLogger("uvicorn.access").addFilter(_QuietAccessLog())
+    if not API_KEY:
+        logger.warning("[API] 未设置 API_KEY，所有接口无需认证。建议在 .env 中设置 API_KEY=<你的密钥>")
+    else:
+        logger.info("[API] API Key 鉴权已启用")
     logger.info("[API] 启动 AutoTeam API 服务器 http://%s:%d", host, port)
     if DIST_DIR.exists():
         logger.info("[API] 前端面板 http://%s:%d", host, port)
