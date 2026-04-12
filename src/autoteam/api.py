@@ -676,6 +676,10 @@ def post_account_login(params: LoginAccountParams):
                     st, info = check_codex_quota(token)
                     if st == "ok" and isinstance(info, dict):
                         update_account(email, last_quota=info)
+            # 同步到 CPA
+            from autoteam.cpa_sync import sync_to_cpa
+
+            sync_to_cpa()
             return {"email": email, "plan": bundle.get("plan_type"), "auth_file": auth_file}
         raise RuntimeError(f"Codex 登录失败: {email}")
 
