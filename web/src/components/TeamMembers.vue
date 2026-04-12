@@ -83,11 +83,34 @@ const data = ref(null)
 const loading = ref(false)
 const error = ref('')
 
+const CACHE_KEY = 'autoteam_team_members'
+
+function loadCache() {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY)
+    if (raw) {
+      const cached = JSON.parse(raw)
+      // 缓存 10 分钟有效
+      if (cached.time && Date.now() - cached.time < 600000) {
+        return cached.data
+      }
+    }
+  } catch {}
+  return null
+}
+
+function saveCache(d) {
+  try {
+    localStorage.setItem(CACHE_KEY, JSON.stringify({ data: d, time: Date.now() }))
+  } catch {}
+}
+
 async function fetchMembers() {
   loading.value = true
   error.value = ''
   try {
     data.value = await api.getTeamMembers()
+    saveCache(data.value)
   } catch (e) {
     error.value = e.message
   } finally {
@@ -96,6 +119,11 @@ async function fetchMembers() {
 }
 
 onMounted(() => {
-  fetchMembers()
+  const cached = loadCache()
+  if (cached) {
+    data.value = cached
+  } else {
+    fetchMembers()
+  }
 })
 </script>
