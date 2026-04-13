@@ -197,6 +197,7 @@ def login_codex_via_browser(email, password, mail_client=None):
     """
     code_verifier, code_challenge = _generate_pkce()
     state = secrets.token_urlsafe(16)
+    _used_codes: set[str] = set()  # 记录已使用的验证码，避免重复提交
 
     chatgpt_account_id = get_chatgpt_account_id()
 
@@ -270,13 +271,25 @@ def login_codex_via_browser(email, password, mail_client=None):
         except Exception:
             pass
 
-        # 输入密码
+        # 输入密码 / 点击一次性验证码登录
         try:
             pi = _page.locator('input[type="password"]').first
             if pi.is_visible(timeout=5000):
-                pi.fill(password)
-                time.sleep(0.5)
-                _click_primary_auth_button(_page, pi, ["Continue", "继续", "Log in"])
+                if password:
+                    pi.fill(password)
+                    time.sleep(0.5)
+                    _click_primary_auth_button(_page, pi, ["Continue", "继续", "Log in"])
+                else:
+                    # 没有密码，点击"使用一次性验证码登录"
+                    otp_btn = _page.locator(
+                        'button:has-text("一次性验证码"), button:has-text("one-time"), button:has-text("email login")'
+                    ).first
+                    if otp_btn.is_visible(timeout=3000):
+                        logger.info("[Codex] 无密码，点击一次性验证码登录")
+                        otp_btn.click()
+                    else:
+                        # fallback: 提交空密码让页面报错，然后找验证码按钮
+                        _click_primary_auth_button(_page, pi, ["Continue", "继续", "Log in"])
                 time.sleep(8)
         except Exception:
             pass
@@ -294,13 +307,14 @@ def login_codex_via_browser(email, password, mail_client=None):
                     for em in mail_client.search_emails_by_recipient(email, size=10):
                         text = em.get("text", "") or em.get("content", "")
                         m = _re2.search(r"\b(\d{6})\b", text)
-                        if m:
+                        if m and m.group(1) not in _used_codes:
                             otp = m.group(1)
                             break
                     if otp:
                         break
                     time.sleep(3)
                 if otp:
+                    _used_codes.add(otp)
                     ci.fill(otp)
                     time.sleep(0.5)
                     _page.locator('button[type="submit"]').first.click()
@@ -445,7 +459,7 @@ def login_codex_via_browser(email, password, mail_client=None):
                         continue
                     text = em.get("text", "") or em.get("content", "")
                     match = _re.search(r"\b(\d{6})\b", text)
-                    if match:
+                    if match and match.group(1) not in _used_codes:
                         otp_code = match.group(1)
                         break
                 if otp_code:
@@ -453,6 +467,7 @@ def login_codex_via_browser(email, password, mail_client=None):
                 time.sleep(3)
 
             if otp_code:
+                _used_codes.add(otp_code)
                 logger.info("[Codex] 获取到验证码: %s", otp_code)
                 code_input.fill(otp_code)
                 time.sleep(0.5)
@@ -629,11 +644,22 @@ def login_codex_via_browser(email, password, mail_client=None):
             # 处理密码页面（可能在 consent 流程中出现）
             try:
                 pwd_field = page.locator('input[name="password"], input[type="password"]').first
-                if pwd_field.is_visible(timeout=2000) and password:
-                    logger.info("[Codex] 需要重新输入密码 (step %d)...", step + 1)
-                    pwd_field.fill(password)
-                    time.sleep(0.5)
-                    _click_primary_auth_button(page, pwd_field, ["Continue", "继续", "Log in"])
+                if pwd_field.is_visible(timeout=2000):
+                    if password:
+                        logger.info("[Codex] 需要重新输入密码 (step %d)...", step + 1)
+                        pwd_field.fill(password)
+                        time.sleep(0.5)
+                        _click_primary_auth_button(page, pwd_field, ["Continue", "继续", "Log in"])
+                    else:
+                        # 没密码，点"使用一次性验证码登录"
+                        otp_btn = page.locator(
+                            'button:has-text("一次性验证码"), button:has-text("one-time"), button:has-text("email login")'
+                        ).first
+                        if otp_btn.is_visible(timeout=3000):
+                            logger.info("[Codex] 无密码，点击一次性验证码登录 (step %d)", step + 1)
+                            otp_btn.click()
+                        else:
+                            _click_primary_auth_button(page, pwd_field, ["Continue", "继续", "Log in"])
                     time.sleep(5)
                     _screenshot(page, f"codex_04_password_{step + 1}.png")
                     continue
@@ -646,11 +672,40 @@ def login_codex_via_browser(email, password, mail_client=None):
                 if otp_input.is_visible(timeout=2000) and mail_client:
                     import re as _re3
 
-                    logger.info("[Codex] 需要邮箱验证码 (step %d)...", step + 1)
+                    # 记录当前时间，只接受之后收到的邮件
+                    from datetime import datetime
+
+                    _otp_request_time = datetime.utcnow()
+
+                    # 提前 30 秒容差，避免时钟偏差导致漏掉刚发的邮件
+                    from datetime import timedelta
+
+                    _otp_cutoff = _otp_request_time - timedelta(seconds=30)
+                    logger.info(
+                        "[Codex] 需要邮箱验证码 (step %d)，等待 %s 之后的新邮件...",
+                        step + 1,
+                        _otp_cutoff.strftime("%H:%M:%S"),
+                    )
                     otp = None
                     t0 = time.time()
                     while time.time() - t0 < 120:
                         for em in mail_client.search_emails_by_recipient(email, size=10):
+                            # 只接受 OpenAI 发的邮件
+                            sender = (em.get("sendEmail") or "").lower()
+                            if "openai" not in sender and "chatgpt" not in sender:
+                                continue
+                            subj = (em.get("subject") or "").lower()
+                            if "invited" in subj or "invitation" in subj:
+                                continue
+                            # 检查邮件时间
+                            create_time_str = em.get("createTime", "")
+                            if create_time_str:
+                                try:
+                                    mail_time = datetime.strptime(create_time_str, "%Y-%m-%d %H:%M:%S")
+                                    if mail_time < _otp_cutoff:
+                                        continue
+                                except Exception:
+                                    pass
                             text = em.get("text", "") or em.get("content", "")
                             m = _re3.search(r"\b(\d{6})\b", text)
                             if m:
@@ -660,6 +715,7 @@ def login_codex_via_browser(email, password, mail_client=None):
                             break
                         time.sleep(3)
                     if otp:
+                        _used_codes.add(otp)
                         otp_input.fill(otp)
                         time.sleep(0.5)
                         page.locator(

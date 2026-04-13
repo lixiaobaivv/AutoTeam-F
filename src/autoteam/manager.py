@@ -62,9 +62,10 @@ MAIL_TIMEOUT = int(os.environ.get("MAIL_TIMEOUT", "180"))
 def sync_account_states(chatgpt_api=None):
     """根据 Team 实际成员列表同步本地账号状态"""
     account_id = get_chatgpt_account_id()
-    accounts = load_accounts()
-    if not accounts:
+    if not account_id:
         return
+    accounts = load_accounts()
+    team_emails = set()
 
     # 获取 Team 实际成员
     need_stop = False
@@ -128,6 +129,39 @@ def sync_account_states(chatgpt_api=None):
                 )
                 changed = True
                 logger.info("[同步] 发现 Team 中新成员: %s（已添加到本地）", email)
+
+    # auths 目录中有认证文件但本地无记录的 → 自动添加为 standby
+    from autoteam.codex_auth import AUTH_DIR
+
+    local_email_set = {a["email"].lower() for a in accounts}  # 刷新一下
+    if AUTH_DIR.exists():
+        for auth_file in AUTH_DIR.glob("codex-*.json"):
+            try:
+                auth_data = json.loads(auth_file.read_text())
+                email = auth_data.get("email", "").lower()
+                if not email or email in local_email_set:
+                    continue
+                # 判断是否在 Team 中
+                in_team = email in team_emails
+                status = STATUS_ACTIVE if in_team else STATUS_STANDBY
+                accounts.append(
+                    {
+                        "email": email,
+                        "password": "",
+                        "cloudmail_account_id": None,
+                        "status": status,
+                        "auth_file": str(auth_file),
+                        "quota_exhausted_at": None,
+                        "quota_resets_at": None,
+                        "created_at": time.time(),
+                        "last_active_at": None,
+                    }
+                )
+                local_email_set.add(email)
+                changed = True
+                logger.info("[同步] 从 auths 目录恢复账号: %s（%s）", email, status)
+            except Exception:
+                continue
 
     if changed:
         save_accounts(accounts)
@@ -1013,15 +1047,27 @@ def reinvite_account(chatgpt_api, mail_client, acc):
         except Exception:
             pass
 
-        # 输入密码
+        # 输入密码 / 点击一次性验证码登录
         pwd_input = page.locator('input[type="password"]').first
         try:
             if pwd_input.is_visible(timeout=5000):
-                pwd_input.fill(password)
-                time.sleep(0.5)
-                page.locator(
-                    'button:has-text("Continue"), button:has-text("继续"), button[type="submit"]'
-                ).first.click()
+                if password:
+                    pwd_input.fill(password)
+                    time.sleep(0.5)
+                    page.locator(
+                        'button:has-text("Continue"), button:has-text("继续"), button[type="submit"]'
+                    ).first.click()
+                else:
+                    otp_btn = page.locator(
+                        'button:has-text("一次性验证码"), button:has-text("one-time"), button:has-text("email login")'
+                    ).first
+                    if otp_btn.is_visible(timeout=3000):
+                        logger.info("[轮转] 无密码，点击一次性验证码登录")
+                        otp_btn.click()
+                    else:
+                        page.locator(
+                            'button:has-text("Continue"), button:has-text("继续"), button[type="submit"]'
+                        ).first.click()
                 time.sleep(8)
         except Exception:
             pass
