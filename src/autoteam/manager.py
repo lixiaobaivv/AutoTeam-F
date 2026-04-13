@@ -782,15 +782,19 @@ def _register_direct_once(mail_client, email, password):
             pass
 
         screenshot(page, "direct_03_after_email.png")
+        logger.info("[直接注册] 当前 URL: %s", page.url)
         if _is_google_redirect(page):
             logger.warning("[直接注册] 邮箱步骤仍停留在 Google 登录页")
             browser.close()
             return False
 
+        # 等待页面跳转完成（可能跳到 create-account/password）
+        time.sleep(5)
+
         try:
             for attempt in range(2):
                 pwd_input = page.locator('input[type="password"]').first
-                if not pwd_input.is_visible(timeout=5000):
+                if not pwd_input.is_visible(timeout=10000):
                     break
 
                 logger.info("[直接注册] 设置密码")
