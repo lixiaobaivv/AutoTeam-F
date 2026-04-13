@@ -162,17 +162,7 @@ API 模式下：
 - 多个账号低于阈值时自动触发轮转
 - 所有操作可在手机端操作
 
-### 方式二：定时任务
-
-如果不想一直运行 API 服务，可以用 cron 定时执行：
-
-```bash
-# 每小时轮转一次
-crontab -e
-0 * * * * cd /path/to/AutoTeam && uv run autoteam rotate >> /var/log/autoteam.log 2>&1
-```
-
-### 方式三：手动执行
+### 方式二：手动执行
 
 ```bash
 uv run autoteam status    # 查看状态
