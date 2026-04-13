@@ -2,7 +2,7 @@
   <div class="mt-6 bg-gray-900 border border-gray-800 rounded-xl p-4">
     <h2 class="text-lg font-semibold text-white mb-4">操作</h2>
     <div v-if="!adminReady" class="mb-4 px-4 py-3 rounded-lg text-sm border bg-amber-500/10 text-amber-300 border-amber-500/20">
-      需要先在下方“管理员登录”里完成主号登录，管理操作才会开放。
+      请先在「设置」页完成管理员登录后，管理操作才会开放。
     </div>
     <div class="flex flex-wrap gap-3">
       <button v-for="action in actions" :key="action.key"
