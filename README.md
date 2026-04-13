@@ -96,6 +96,7 @@ docker compose up -d
 
 | 文档 | 内容 |
 |------|------|
+| [从零开始部署](docs/getting-started.md) | 完整的首次部署教程，从安装到首次轮转 |
 | [配置说明](docs/configuration.md) | .env 配置项、管理员登录、认证文件格式 |
 | [Docker 部署](docs/docker.md) | Docker Compose、数据持久化、Web 配置 |
 | [API 文档](docs/api.md) | 全部 HTTP 端点、调用示例 |
