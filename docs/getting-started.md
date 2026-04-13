@@ -12,8 +12,41 @@
 | **CloudMail** | 临时邮箱服务，用于自动注册 | 自建 [cloud-mail](https://github.com/maillab/cloud-mail) |
 | **CLIProxyAPI** | Codex 代理，认证文件同步目标 | 自建 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) |
 | **VPS** | Linux 服务器（推荐 Ubuntu 22.04+，2G 内存以上） | 任意云服务商 |
+| **域名** | 一个域名，用于 CloudMail 临时邮箱和 Verified Domains | 任意域名注册商 |
 
 > 建议使用住宅 IP 或干净的 VPS IP，避免被 OpenAI/Cloudflare 标记。
+
+## 准备工作
+
+### 1. 搭建 CloudMail
+
+参考 CloudMail 官方文档完成搭建：https://doc.skymail.ink/guide/dashboard
+
+搭建完成后你会得到：
+- CloudMail API 地址（如 `https://your-domain.com/api`）
+- 管理员邮箱和密码
+- 邮箱域名（如 `@your-domain.com`）
+
+### 2. 设置 OpenAI Verified Domains
+
+由于重复的 invite 有概率触发 `"unable to invite user due to an error."` 错误，需要设置域名验证让账号自动加入 Team。
+
+1. 打开 ChatGPT → Settings → Account
+2. 找到 **Verified Domains**，点击 **Verify new domain**
+3. 输入你的域名（如 `your-domain.com`）
+4. 在 Cloudflare（或你的 DNS 服务商）添加 OpenAI 要求的 DNS 记录
+5. 回到 ChatGPT 点击 **Check**，验证通过后状态变为 verified
+6. 进入 Workspace → Identity & Access，打开 **Automatic account creation**
+
+这样使用该域名邮箱注册的 ChatGPT 账号会自动加入你的 Team workspace，不需要手动邀请。
+
+### 3. 搭建 CLIProxyAPI
+
+参考 CPA 项目文档完成搭建：https://github.com/router-for-me/CLIProxyAPI
+
+搭建完成后你会得到：
+- CPA 地址（如 `http://127.0.0.1:8317`）
+- 管理密钥（`secret-key`）
 
 ## 第一步：安装
 
