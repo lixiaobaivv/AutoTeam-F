@@ -80,6 +80,13 @@
                   {{ actionEmail === acc.email && actionType === 'kick' ? '移出中...' : '移出' }}
                 </button>
                 <button
+                  v-if="acc.status === 'active'"
+                  @click="exportCodexAuth(acc.email)"
+                  :disabled="actionEmail === acc.email"
+                  class="px-3 py-1.5 rounded-lg text-xs font-medium border transition bg-cyan-600/10 text-cyan-400 border-cyan-500/30 hover:bg-cyan-600/20">
+                  导出
+                </button>
+                <button
                   @click="removeAccount(acc.email)"
                   :disabled="actionDisabled || actionEmail === acc.email"
                   class="px-3 py-1.5 rounded-lg text-xs font-medium border transition"
@@ -92,6 +99,48 @@
             </tr>
           </tbody>
         </table>
+      </div>
+
+      <!-- Codex 认证导出弹窗 -->
+      <div v-if="exportData" class="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" @click.self="exportData = null">
+        <div class="bg-gray-900 border border-gray-800 rounded-xl w-full max-w-2xl max-h-[80vh] flex flex-col">
+          <div class="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+            <h3 class="text-white font-semibold">Codex CLI 认证文件</h3>
+            <button @click="exportData = null" class="text-gray-400 hover:text-white text-lg">&times;</button>
+          </div>
+          <div class="p-4 space-y-3 overflow-y-auto flex-1">
+            <div class="px-3 py-2 bg-amber-500/10 border border-amber-500/20 rounded-lg text-sm text-amber-300 space-y-2">
+              <div class="font-medium">使用步骤：</div>
+              <ol class="list-decimal list-inside space-y-1 text-xs text-amber-400/90">
+                <li>退出当前 Codex CLI 会话</li>
+                <li>删除旧文件：<code class="bg-gray-800 px-1 rounded">rm ~/.codex/auth.json</code></li>
+                <li>将下方内容保存到 <code class="bg-gray-800 px-1 rounded">~/.codex/auth.json</code>（Windows: <code class="bg-gray-800 px-1 rounded">%APPDATA%\codex\auth.json</code>）</li>
+                <li>重新启动 Codex CLI</li>
+              </ol>
+              <div class="text-xs text-amber-400/60">导出后 Codex CLI 直连 OpenAI，不走 CPA 代理，响应更快。</div>
+            </div>
+            <div class="relative">
+              <pre class="bg-gray-950 border border-gray-800 rounded-lg p-4 text-xs font-mono text-gray-300 overflow-x-auto whitespace-pre">{{ exportJson }}</pre>
+              <button @click="copyExport"
+                class="absolute top-2 right-2 px-2 py-1 rounded border text-xs transition"
+                :class="copied
+                  ? 'bg-green-600/20 text-green-400 border-green-500/30'
+                  : 'bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white border-gray-700'">
+                {{ copied ? '复制成功' : '复制' }}
+              </button>
+            </div>
+          </div>
+          <div class="px-4 py-3 border-t border-gray-800 flex justify-end gap-3">
+            <button @click="downloadExport"
+              class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm rounded-lg transition">
+              下载 auth.json
+            </button>
+            <button @click="exportData = null"
+              class="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-sm text-gray-300 rounded-lg border border-gray-700 transition">
+              关闭
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -124,6 +173,8 @@ const actionEmail = ref('')
 const actionType = ref('')
 const syncing = ref(false)
 const message = ref('')
+const exportData = ref(null)
+const copied = ref(false)
 const messageClass = ref('')
 const adminReady = computed(() => !!props.adminStatus?.configured)
 const actionDisabled = computed(() => !!props.runningTask || !adminReady.value)
@@ -187,6 +238,50 @@ function pctColor(val) {
   if (val > 30) return 'text-green-400'
   if (val > 0) return 'text-yellow-400'
   return 'text-red-400'
+}
+
+const exportJson = computed(() => {
+  if (!exportData.value) return ''
+  return JSON.stringify(exportData.value.codex_auth, null, 2)
+})
+
+async function exportCodexAuth(email) {
+  try {
+    exportData.value = await api.getCodexAuth(email)
+    copied.value = false
+  } catch (e) {
+    message.value = e.message
+    messageClass.value = 'bg-red-500/10 text-red-400 border-red-500/20'
+    setTimeout(() => { message.value = '' }, 8000)
+  }
+}
+
+async function copyExport() {
+  try {
+    await navigator.clipboard.writeText(exportJson.value)
+  } catch {
+    // HTTP 下 clipboard API 不可用，用 textarea fallback
+    const ta = document.createElement('textarea')
+    ta.value = exportJson.value
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.select()
+    document.execCommand('copy')
+    document.body.removeChild(ta)
+  }
+  copied.value = true
+  setTimeout(() => { copied.value = false }, 3000)
+}
+
+function downloadExport() {
+  const blob = new Blob([exportJson.value], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = 'auth.json'
+  a.click()
+  URL.revokeObjectURL(url)
 }
 
 async function syncAccounts() {

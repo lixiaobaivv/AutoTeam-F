@@ -839,6 +839,42 @@ def get_accounts():
     return [_sanitize_account(a) for a in accounts]
 
 
+@app.get("/api/accounts/{email}/codex-auth")
+def get_codex_auth(email: str):
+    """导出账号的 Codex CLI 格式认证文件（~/.codex/auth.json）"""
+    from autoteam.accounts import find_account, load_accounts
+
+    email = email.strip().lower()
+    acc = find_account(load_accounts(), email)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    auth_file = acc.get("auth_file")
+    if not auth_file or not Path(auth_file).exists():
+        raise HTTPException(status_code=404, detail="该账号没有认证文件")
+
+    auth_data = json.loads(Path(auth_file).read_text())
+
+    # 转换为 Codex CLI 的 auth.json 格式
+    codex_auth = {
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": None,
+        "tokens": {
+            "id_token": auth_data.get("id_token", ""),
+            "access_token": auth_data.get("access_token", ""),
+            "refresh_token": auth_data.get("refresh_token", ""),
+            "account_id": auth_data.get("account_id", ""),
+        },
+        "last_refresh": auth_data.get("last_refresh", ""),
+    }
+
+    return {
+        "email": email,
+        "codex_auth": codex_auth,
+        "hint": "将内容保存到 ~/.codex/auth.json（Linux/macOS）或 %APPDATA%\\codex\\auth.json（Windows）",
+    }
+
+
 @app.get("/api/accounts/active")
 def get_active():
     """获取活跃账号"""
