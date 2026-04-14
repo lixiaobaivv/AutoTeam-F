@@ -39,9 +39,16 @@
 ### 安装
 
 ```bash
+# Linux
 bash setup.sh
 # 或手动: uv sync && uv run playwright install chromium
+
+# Windows / macOS
+uv sync
+uv run playwright install chromium
 ```
+
+支持 Linux、Windows、macOS。Windows/macOS 不需要 xvfb。
 
 ### 启动
 
