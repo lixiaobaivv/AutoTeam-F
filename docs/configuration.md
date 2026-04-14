@@ -1,8 +1,8 @@
 # 配置说明
 
-## .env 配置项
+## `.env` 配置项
 
-首次运行任何命令时会自动进入配置向导，交互式填写必填项并验证连通性。也可以手动编辑 `.env`：
+首次运行任何命令时会自动进入配置向导，交互式填写必填项并验证连通性。也可以手动编辑：
 
 ```bash
 cp .env.example .env
@@ -17,29 +17,43 @@ cp .env.example .env
 | `CPA_URL` | CLIProxyAPI 地址 | 否（默认 `http://127.0.0.1:8317`） |
 | `CPA_KEY` | CPA 管理密钥 | 是 |
 | `API_KEY` | Web 面板 / API 鉴权密钥 | 否（首次启动自动生成） |
-| `AUTO_CHECK_THRESHOLD` | 额度低于此百分比触发轮转 | 否（默认 `10`，可在面板修改） |
+| `AUTO_CHECK_THRESHOLD` | 额度低于此百分比触发轮转 | 否（默认 `10`） |
 | `AUTO_CHECK_INTERVAL` | 巡检间隔（秒） | 否（默认 `300`） |
 | `AUTO_CHECK_MIN_LOW` | 至少几个账号低于阈值才触发 | 否（默认 `2`） |
 
-## 管理员登录
+### 内联注释
 
-首次启动后在 Web 面板「设置」页或命令行完成主号登录：
+`.env` 支持尾部内联注释，例如：
+
+```env
+AUTO_CHECK_INTERVAL=300  # 5 分钟
+```
+
+Windows / macOS 下也会按 UTF-8 正常读取。
+
+## 管理员登录态
+
+首次启动后，在 Web 面板「设置」页或命令行完成主号登录：
 
 ```bash
 uv run autoteam admin-login
 uv run autoteam admin-login --email you@example.com
 ```
 
-系统自动保存到 `state.json`（邮箱、session token、workspace ID 等）。
+系统会自动保存到 `state.json`，包括：
+- 邮箱
+- session token
+- workspace ID
+- workspace 名称
+- 密码（如果你走的是密码登录）
 
-## 主号 Codex Sync
+## 主号 Codex 同步
 
 `main-codex-sync` 用于把管理员主号的 Codex 登录态单独同步到 CPA。
 
 - **前置条件**：先完成 `admin-login`
-- **交互方式**：命令行或 Web 都可以发起
-- **同步结果**：成功后生成 `auths/codex-main-*.json`，并推送到 CPA
-- **作用范围**：主号专用，不加入轮转池
+- **结果文件**：`auths/codex-main-*.json`
+- **作用范围**：主号专用，不进入轮转池
 
 ```bash
 uv run autoteam main-codex-sync
@@ -47,7 +61,13 @@ uv run autoteam main-codex-sync
 
 ## 认证文件格式
 
-兼容 CLIProxyAPI，文件名格式：`codex-{email}-{plan_type}-{hash}.json`
+兼容 CLIProxyAPI，文件名格式：
+
+```text
+codex-{email}-{plan_type}-{hash}.json
+```
+
+文件内容示例：
 
 ```json
 {
@@ -62,10 +82,28 @@ uv run autoteam main-codex-sync
 }
 ```
 
+反向同步 (`pull-cpa`) 时，CPA 中下载回来的文件也会被重新整理成这个命名规范。
+
+## 本地数据文件
+
+| 文件 / 目录 | 作用 |
+|-------------|------|
+| `.env` | 运行配置 |
+| `accounts.json` | 本地账号池状态 |
+| `state.json` | 管理员登录态 |
+| `auths/` | 轮转账号与主号的 Codex 认证文件 |
+| `screenshots/` | 浏览器自动化调试截图 |
+
+其中：
+- `auths/codex-main-*.json` 是主号专用
+- `auths/codex-{email}-{plan}-{hash}.json` 是轮转账号
+- 从 CPA 反向同步时会自动清理同账号重复文件
+
 ## 启动验证
 
 每次启动会自动验证 CloudMail 和 CPA 的连通性：
+
 - CloudMail：登录 → 创建测试邮箱 → 删除
 - CPA：获取认证文件列表
 
-验证失败会提示具体哪个环节有问题，配置有误时拒绝启动。
+验证失败会提示具体哪个环节有问题，配置有误时会拒绝启动。

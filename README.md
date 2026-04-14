@@ -2,9 +2,9 @@
 
 # AutoTeam
 
-**ChatGPT Team 账号自动轮转管理工具**
+**面向 ChatGPT Team 的账号轮转与认证同步工具**
 
-自动创建账号、注册、获取 Codex 认证、检查额度、智能轮换，并同步认证文件到 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
+自动注册账号、获取 Codex 认证、按额度轮转席位，并与 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 双向同步认证文件。
 
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![Playwright](https://img.shields.io/badge/Playwright-Chromium-2EAD33?style=for-the-badge&logo=playwright&logoColor=white)](https://playwright.dev)
@@ -24,15 +24,16 @@
 
 | | 功能 | 描述 |
 |---|---|---|
-| 📧 | **自动注册** | 创建临时邮箱 → 注册 ChatGPT → 自动填写验证码/个人信息 |
-| 🔐 | **Codex OAuth** | 自动完成 Codex 登录，无密码时走一次性验证码 |
-| 🔄 | **智能轮转** | 额度低于阈值自动移出，复用前验证，超员自动清理 |
-| ☁️ | **CPA 同步** | 认证文件自动上传覆盖，只同步 active 账号 |
-| 🖥️ | **Web 面板** | 仪表盘、Team 成员、操作任务、实时日志、巡检设置 |
-| 🔍 | **自动巡检** | 后台定时检查额度，低于阈值自动触发轮转 |
-| 🐳 | **Docker** | 一键部署，Web 页面配置，数据持久化 |
+| 📧 | **自动注册** | CloudMail 临时邮箱 + Playwright 自动注册 |
+| 🔐 | **Codex OAuth** | 自动登录 Codex，无密码时可走邮箱验证码 |
+| 🔑 | **手动 OAuth 导入** | 支持 localhost 自动回调，也支持手动粘贴回调 URL |
+| 🔄 | **智能轮转** | 额度不足自动移出，旧号恢复后优先复用 |
+| ☁️ | **CPA 双向同步** | 本地 active 上传到 CPA，也可从 CPA 反向导入 |
+| 🖥️ | **Web 面板** | 仪表盘、同步中心、OAuth 登录、任务历史、日志、设置 |
+| 🔍 | **自动巡检** | 后台定时检查额度并触发轮转 |
+| 🐳 | **Docker** | 支持容器部署与数据持久化 |
 
-**首次使用？** 查看 [从零开始部署教程](docs/getting-started.md)，手把手完成安装、配置、首次轮转。
+**首次使用建议直接看**：[从零开始部署教程](docs/getting-started.md)
 
 ## 快速开始
 
@@ -89,6 +90,8 @@ docker compose up -d
 | `pull-cpa` | 从 CPA 反向同步认证文件到本地 |
 | `admin-login` | 管理员登录 |
 
+更多参数与接口说明见 [API 文档](docs/api.md)。
+
 ## Web 管理面板
 
 启动 `uv run autoteam api` 后访问 `http://localhost:8787`。
@@ -97,12 +100,12 @@ docker compose up -d
 |------|------|
 | 📊 仪表盘 | 账号统计 + 状态表格 + 登录/移出/删除/同步操作 |
 | 👥 Team 成员 | 全部 Team 成员（含外部成员） |
-| ⚡ 操作 & 任务 | 一键轮转/检查/补满/清理/同步 + 任务历史 |
+| 🔁 账号池操作 | 轮转、检查、补满、添加、清理等会直接改变账号池状态的操作 |
+| 🔄 同步中心 | 同步账号、同步 CPA、拉取 CPA 等对账/同步动作 |
 | 🔐 OAuth 登录 | 生成认证链接；优先自动接收 localhost 回调，失败时也可手动粘贴回调 URL |
+| 📜 任务历史 | 查看后台任务执行状态、参数、耗时与结果 |
 | 📋 日志 | 实时日志查看器 |
 | ⚙️ 设置 | 管理员登录 + 主号 Codex 同步 + 巡检配置 |
-
-适配桌面端和手机端。
 
 ## 文档
 
@@ -114,6 +117,12 @@ docker compose up -d
 | [API 文档](docs/api.md) | 全部 HTTP 端点、调用示例 |
 | [工作原理](docs/architecture.md) | 轮转流程、状态机、项目结构、依赖 |
 | [常见问题](docs/troubleshooting.md) | 安装/登录/轮转/Docker/Web 面板问题 |
+
+## 适用场景
+
+- 需要维持固定数量的 Team 可用席位
+- 需要把 Codex 认证文件同步到 CLIProxyAPI
+- 需要在 Web 面板里完成日常轮转、对账、OAuth 导入
 
 ## 已知限制
 
