@@ -545,7 +545,7 @@ def cmd_check():
     return exhausted_list
 
 
-def remove_from_team(chatgpt_api, email):
+def remove_from_team(chatgpt_api, email, *, return_status=False):
     """将账号从 Team 中移除"""
     account_id = get_chatgpt_account_id()
     # 先获取成员列表找到 user_id
@@ -554,14 +554,14 @@ def remove_from_team(chatgpt_api, email):
 
     if result["status"] != 200:
         logger.error("[Team] 获取成员列表失败: %d", result["status"])
-        return False
+        return "failed" if return_status else False
 
     try:
         data = json.loads(result["body"])
         members = data.get("items", data.get("users", data.get("members", [])))
     except Exception:
         logger.error("[Team] 解析成员列表失败")
-        return False
+        return "failed" if return_status else False
 
     # 找到对应邮箱的成员
     target_user_id = None
@@ -574,7 +574,7 @@ def remove_from_team(chatgpt_api, email):
     if not target_user_id:
         logger.info("[Team] 未在成员列表中找到 %s（可能已移出）", email)
         # 可能已经不在 team 了
-        return True
+        return "already_absent" if return_status else True
 
     # 删除成员
     delete_path = f"/backend-api/accounts/{account_id}/users/{target_user_id}"
@@ -582,10 +582,10 @@ def remove_from_team(chatgpt_api, email):
 
     if result["status"] in (200, 204):
         logger.info("[Team] 已将 %s 移出 Team", email)
-        return True
+        return "removed" if return_status else True
     else:
         logger.error("[Team] 移除 %s 失败: %d %s", email, result["status"], result["body"][:200])
-        return False
+        return "failed" if return_status else False
 
 
 def invite_to_team(chatgpt_api, email, seat_type="default"):
@@ -1360,40 +1360,56 @@ def cmd_rotate(target_seats=5):
         # 移出所有 exhausted 账号（包括之前已标记的）
         all_accounts = load_accounts()
         all_exhausted = [a for a in all_accounts if a["status"] == STATUS_EXHAUSTED]
+        initial_api_count = -1
+        removed_now = 0
+        already_absent_count = 0
 
         if all_exhausted:
             logger.info("[3/5] 移出 %d 个额度用完的账号...", len(all_exhausted))
             ensure_chatgpt()
+            initial_api_count = get_team_member_count(chatgpt)
             for acc in all_exhausted:
                 email = acc["email"]
                 if not chatgpt.browser:
                     chatgpt.start()
-                if remove_from_team(chatgpt, email):
+                remove_status = remove_from_team(chatgpt, email, return_status=True)
+                if remove_status in ("removed", "already_absent"):
                     update_account(email, status=STATUS_STANDBY)
-                    logger.info("[3/5] %s → standby", email)
+                    if remove_status == "removed":
+                        removed_now += 1
+                        logger.info("[3/5] %s → standby（已从 Team 移出）", email)
+                    else:
+                        already_absent_count += 1
+                        logger.info("[3/5] %s → standby（远端已不存在）", email)
         else:
             logger.info("[3/5] 无需移出账号")
-
-        removed_count = len(
-            [
-                a
-                for a in all_exhausted
-                if find_account(load_accounts(), a["email"])
-                and find_account(load_accounts(), a["email"])["status"] == STATUS_STANDBY
-            ]
-        )
         if not chatgpt or not chatgpt.browser:
             ensure_chatgpt()
         api_count = get_team_member_count(chatgpt)
-        logger.info("[4/5] API 返回成员数: %d（本轮移出: %d）", api_count, removed_count)
+        logger.info(
+            "[4/5] API 返回成员数: %d（实际移出: %d，远端已缺席: %d）",
+            api_count,
+            removed_now,
+            already_absent_count,
+        )
         if api_count <= 0:
             # API 返回异常，用本地 active 账号数兜底
             local_active = sum(1 for a in load_accounts() if a["status"] == STATUS_ACTIVE)
             logger.warning("[4/5] API 成员数异常 (%d)，使用本地 active 数: %d", api_count, local_active)
             current_count = local_active
         else:
-            # API 有缓存延迟，移出后可能返回旧数据，手动修正
-            current_count = max(0, api_count - removed_count)
+            # 保守估算当前成员数：
+            # - api_count 是移除后的最新观察值
+            # - initial_api_count - removed_now 是基于移除前人数的理论下界
+            # 若远端成员本就不存在（already_absent），不能再从 api_count 里额外扣减，否则会少算人数。
+            estimates = [api_count]
+            if initial_api_count > 0 and removed_now > 0:
+                estimates.append(max(0, initial_api_count - removed_now))
+            current_count = min(estimates)
+            if len(estimates) > 1 and current_count != api_count:
+                logger.info(
+                    "[4/5] 成员数保守估算: %d（初始=%d，移出=%d）", current_count, initial_api_count, removed_now
+                )
         vacancies = TARGET - current_count
 
         if vacancies <= 0:
@@ -1508,16 +1524,15 @@ def cmd_rotate(target_seats=5):
         remaining = TARGET - current_count
         if remaining <= 0:
             logger.info("[4/5] 已用旧账号填满空缺")
-            return
-
-        # 必须创建新号
-        logger.info("[5/5] 创建 %d 个新账号...", remaining)
-        for i in range(remaining):
-            logger.info("[5/5] 创建第 %d/%d 个...", i + 1, remaining)
-            if not chatgpt or not chatgpt.browser:
-                ensure_chatgpt()
-            if create_new_account(chatgpt, ensure_mail()):
-                current_count += 1
+        else:
+            # 必须创建新号
+            logger.info("[5/5] 创建 %d 个新账号...", remaining)
+            for i in range(remaining):
+                logger.info("[5/5] 创建第 %d/%d 个...", i + 1, remaining)
+                if not chatgpt or not chatgpt.browser:
+                    ensure_chatgpt()
+                if create_new_account(chatgpt, ensure_mail()):
+                    current_count += 1
 
         if not chatgpt or not chatgpt.browser:
             ensure_chatgpt()
