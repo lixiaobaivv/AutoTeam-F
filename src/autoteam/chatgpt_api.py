@@ -200,10 +200,35 @@ class ChatGPTTeamAPI:
             pass
 
         try:
+            btn = self.page.get_by_role("button", name=label_re).last
+            if btn.is_visible(timeout=2000):
+                btn.click()
+                return True
+        except Exception:
+            pass
+
+        try:
             field.press("Enter")
             return True
         except Exception:
             return False
+
+    def _body_excerpt(self, limit=300):
+        try:
+            return self.page.locator("body").inner_text(timeout=1500)[:limit].replace("\n", " ")
+        except Exception:
+            return ""
+
+    def _wait_for_login_step(self, allowed_steps, timeout=15):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            step, detail = self._detect_login_step()
+            if step in allowed_steps:
+                return step, detail
+            if "challenge" in (self.page.url or "").lower():
+                self._wait_for_cloudflare()
+            time.sleep(0.5)
+        return self._detect_login_step()
 
     def _extract_session_token(self):
         cookies = self.context.cookies()
@@ -698,6 +723,15 @@ class ChatGPTTeamAPI:
             logger.info("[ChatGPT] 登录步骤检测: password_required | URL=%s", self.page.url)
             return "password_required", None
 
+        if self._visible_locator_in_frames(self.EMAIL_INPUT_SELECTORS, timeout_ms=1200):
+            logger.info("[ChatGPT] 登录步骤检测: email_required | URL=%s", self.page.url)
+            return "email_required", None
+
+        url = (self.page.url or "").lower()
+        if "log-in-or-create-account" in url or url.endswith("/auth/login"):
+            logger.info("[ChatGPT] 登录步骤检测: email_required(url) | URL=%s", self.page.url)
+            return "email_required", None
+
         session_token = self._extract_session_token()
         if session_token:
             logger.info("[ChatGPT] 登录步骤检测: completed(session) | URL=%s", self.page.url)
@@ -722,7 +756,10 @@ class ChatGPTTeamAPI:
         self._log_login_state("进入 chatgpt.com 后")
         self._open_login_page()
 
-        step, detail = self._detect_login_step()
+        step, detail = self._wait_for_login_step(
+            {"email_required", "password_required", "code_required", "workspace_required", "completed", "error"},
+            timeout=12,
+        )
         if step == "workspace_required":
             self._list_workspace_options()
         if step in ("password_required", "code_required", "workspace_required", "completed", "error"):
@@ -742,17 +779,45 @@ class ChatGPTTeamAPI:
                 pass
             raise RuntimeError(f"未找到{actor_label}邮箱输入框，当前 URL: {self.page.url}，页面片段: {body_excerpt}")
 
-        email_input.fill(email)
-        time.sleep(0.5)
-        self._click_auth_button(email_input, ["Continue", "继续"])
-        time.sleep(3)
-        self._log_login_state(f"{actor_label}邮箱提交后")
+        final_step, final_detail = "unknown", self.page.url
+        for attempt in range(1, 4):
+            email_input = self._visible_locator_in_frames(self.EMAIL_INPUT_SELECTORS, timeout_ms=3000) or email_input
+            try:
+                email_input.fill(email)
+            except Exception:
+                try:
+                    email_input.click(timeout=1000)
+                    email_input.fill(email)
+                except Exception:
+                    pass
+            time.sleep(0.5)
+            clicked = self._click_auth_button(email_input, ["Continue", "继续", "Log in"])
+            logger.info("[ChatGPT] %s邮箱已提交（第 %d 次）| clicked=%s", actor_label, attempt, clicked)
+            final_step, final_detail = self._wait_for_login_step(
+                {"email_required", "password_required", "code_required", "workspace_required", "completed", "error"},
+                timeout=12,
+            )
+            self._log_login_state(f"{actor_label}邮箱提交后（第 {attempt} 次）")
+            if final_step == "workspace_required":
+                self._list_workspace_options()
+            if final_step != "email_required":
+                break
+            logger.warning(
+                "[ChatGPT] %s邮箱提交后仍停留在邮箱步骤（第 %d 次）| URL=%s | body=%s",
+                actor_label,
+                attempt,
+                self.page.url,
+                self._body_excerpt(),
+            )
 
-        step, detail = self._detect_login_step()
-        if step == "workspace_required":
-            self._list_workspace_options()
-        logger.info("[ChatGPT] %s邮箱提交结果: %s | detail=%s", actor_label, step, detail)
-        return {"step": step, "detail": detail}
+        if final_step == "email_required":
+            raise RuntimeError(
+                f"{actor_label}邮箱提交后仍停留在邮箱步骤，请检查登录页是否拦截/未响应。"
+                f" 当前 URL: {self.page.url}，页面片段: {self._body_excerpt()}"
+            )
+
+        logger.info("[ChatGPT] %s邮箱提交结果: %s | detail=%s", actor_label, final_step, final_detail)
+        return {"step": final_step, "detail": final_detail}
 
     def begin_admin_login(self, email):
         return self.begin_login(email, actor_label="管理员")
