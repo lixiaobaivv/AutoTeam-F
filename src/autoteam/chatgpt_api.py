@@ -506,6 +506,146 @@ class ChatGPTTeamAPI:
             return self.workspace_options_cache
         return self._list_workspace_options()
 
+    def _click_workspace_option_by_label(self, label):
+        if not self.page:
+            return False
+
+        try:
+            result = self.page.evaluate(
+                """(label) => {
+                const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+                const lower = (s) => norm(s).toLowerCase();
+                const targetLabel = lower(label);
+                const actionWords = ['open', '打开', 'launch', 'continue', '进入'];
+                const interactive = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+                const candidates = [];
+
+                const collectCandidate = (el, cardText, depth) => {
+                    const idx = interactive.indexOf(el);
+                    if (idx < 0) return;
+                    const btnText = norm(el.textContent);
+                    const btnLower = btnText.toLowerCase();
+                    let score = 100 - depth;
+                    if (btnLower === targetLabel) score += 30;
+                    if (actionWords.some(word => btnLower.includes(word))) score += 100;
+                    if (lower(cardText).startsWith(targetLabel)) score += 15;
+                    candidates.push({
+                        buttonIndex: idx,
+                        buttonText: btnText,
+                        cardText: norm(cardText).slice(0, 160),
+                        score,
+                    });
+                };
+
+                for (const el of interactive) {
+                    let node = el;
+                    for (let depth = 0; depth < 7 && node && node.parentElement; depth++) {
+                        node = node.parentElement;
+                        const cardText = norm(node.textContent);
+                        if (!cardText) continue;
+                        if (!lower(cardText).includes(targetLabel)) continue;
+                        collectCandidate(el, cardText, depth);
+                        break;
+                    }
+                }
+
+                if (!candidates.length) {
+                    const allNodes = Array.from(document.querySelectorAll('*'));
+                    for (const node of allNodes) {
+                        const text = norm(node.textContent);
+                        if (lower(text) !== targetLabel) continue;
+
+                        let parent = node;
+                        for (let depth = 0; depth < 7 && parent && parent.parentElement; depth++) {
+                            parent = parent.parentElement;
+                            const buttons = Array.from(parent.querySelectorAll('button, a, [role="button"]'));
+                            if (!buttons.length) continue;
+                            for (const btn of buttons) {
+                                collectCandidate(btn, parent.textContent || text, depth + 10);
+                            }
+                            if (buttons.length) break;
+                        }
+                    }
+                }
+
+                if (!candidates.length) {
+                    return { clicked: false, reason: 'no-match' };
+                }
+
+                candidates.sort((a, b) => b.score - a.score);
+                const chosen = candidates[0];
+                const btn = interactive[chosen.buttonIndex];
+                if (!btn) {
+                    return { clicked: false, reason: 'missing-button', chosen };
+                }
+                btn.click();
+                return {
+                    clicked: true,
+                    buttonText: chosen.buttonText,
+                    cardText: chosen.cardText,
+                    candidateCount: candidates.length,
+                };
+            }""",
+                label,
+            )
+        except Exception as exc:
+            logger.warning("[ChatGPT] JS 点击 workspace(%s) 失败: %s", label, exc)
+            result = None
+
+        if result and result.get("clicked"):
+            logger.info(
+                "[ChatGPT] 点击 workspace 动作成功: label=%s button=%s candidates=%s card=%s",
+                label,
+                result.get("buttonText", ""),
+                result.get("candidateCount", 0),
+                result.get("cardText", ""),
+            )
+            return True
+
+        try:
+            action_re = re.compile(r"(open|打开|launch|continue|进入)", re.I)
+            container = self.page.locator(f"text={label}").first.locator(
+                "xpath=ancestor::*[self::div or self::li or self::section][1]"
+            )
+            action_btn = container.get_by_role("button", name=action_re).first
+            if action_btn.is_visible(timeout=2000):
+                action_btn.click(force=True)
+                logger.info("[ChatGPT] Playwright fallback 点击 workspace 动作: %s", label)
+                return True
+        except Exception:
+            pass
+
+        try:
+            loc = self.page.locator(f"text={label}").first
+            if loc.is_visible(timeout=2000):
+                loc.click(force=True)
+                logger.info("[ChatGPT] Playwright fallback 点击 workspace 文本: %s", label)
+                return True
+        except Exception:
+            pass
+
+        logger.warning("[ChatGPT] 未找到可点击的 workspace 动作: %s | reason=%s", label, (result or {}).get("reason"))
+        return False
+
+    def _wait_for_workspace_selection_exit(self, timeout=15):
+        deadline = time.time() + timeout
+        last_url = self.page.url if self.page else ""
+        while time.time() < deadline:
+            if not self.page:
+                return False
+            try:
+                self.page.wait_for_load_state("domcontentloaded", timeout=1000)
+            except Exception:
+                pass
+            if "challenge" in (self.page.url or "").lower():
+                self._wait_for_cloudflare()
+            if not self._is_workspace_selection_page():
+                return True
+            last_url = self.page.url
+            time.sleep(0.5)
+        logger.warning("[ChatGPT] workspace 点击后仍停留在选择页 | URL=%s", last_url)
+        return False
+
     def select_workspace_option(self, option_id):
         options = self._list_workspace_options()
         for option in options:
@@ -515,73 +655,20 @@ class ChatGPTTeamAPI:
             label = option["label"]
             logger.info("[ChatGPT] 用户选择 workspace: %s", label)
 
-            # 用 JS 找到包含该文本的可点击卡片并点击
-            clicked = False
-            try:
-                clicked = self.page.evaluate(
-                    """(label) => {
-                    // 找到文本完全匹配的最小元素
-                    let matchEl = null;
-                    for (const el of document.querySelectorAll('*')) {
-                        // 直接文本内容（不含子元素的文本）匹配
-                        const directText = Array.from(el.childNodes)
-                            .filter(n => n.nodeType === 3)
-                            .map(n => n.textContent.trim())
-                            .join('');
-                        if (directText === label) {
-                            matchEl = el;
-                            break;
-                        }
-                    }
-                    if (!matchEl) {
-                        // fallback: textContent 完全匹配
-                        for (const el of document.querySelectorAll('*')) {
-                            if (el.textContent.trim() === label && el.children.length === 0) {
-                                matchEl = el;
-                                break;
-                            }
-                        }
-                    }
-                    if (!matchEl) return false;
-
-                    // 从匹配元素往上找最近的可点击容器（a/button/有 click handler 的 div）
-                    let target = matchEl;
-                    let bestTarget = matchEl;
-                    while (target && target.tagName !== 'BODY') {
-                        const tag = target.tagName.toLowerCase();
-                        if (tag === 'a' || tag === 'button') {
-                            bestTarget = target;
-                            break;
-                        }
-                        // 有 cursor:pointer 样式的元素
-                        const style = window.getComputedStyle(target);
-                        if (style.cursor === 'pointer') {
-                            bestTarget = target;
-                        }
-                        target = target.parentElement;
-                    }
-                    bestTarget.click();
-                    return true;
-                }""",
-                    label,
-                )
-            except Exception as e:
-                logger.warning("[ChatGPT] JS 点击 workspace 失败: %s", e)
-
-            if not clicked:
-                # fallback: Playwright text 选择器 + force click
-                try:
-                    loc = self.page.locator(f"text={label}").first
-                    if loc.is_visible(timeout=2000):
-                        loc.click(force=True)
-                        clicked = True
-                except Exception:
-                    pass
-
+            clicked = self._click_workspace_option_by_label(label)
             if not clicked:
                 raise RuntimeError(f"未找到可点击的 workspace 选项: {label}")
 
-            time.sleep(3)
+            exited = self._wait_for_workspace_selection_exit(timeout=15)
+            if not exited:
+                logger.warning("[ChatGPT] 手动选择 workspace 后仍未离开选择页，尝试自动点击一次: %s", label)
+                if self._auto_open_preferred_workspace():
+                    self._wait_for_workspace_selection_exit(timeout=10)
+
+            try:
+                self.page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except Exception:
+                pass
             self.workspace_options_cache = []
             self._log_login_state("选择 workspace 后")
             step, detail = self._detect_login_step()
