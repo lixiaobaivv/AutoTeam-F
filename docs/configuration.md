@@ -17,9 +17,33 @@ cp .env.example .env
 | `CPA_URL` | CLIProxyAPI 地址 | 否（默认 `http://127.0.0.1:8317`） |
 | `CPA_KEY` | CPA 管理密钥 | 是 |
 | `API_KEY` | Web 面板 / API 鉴权密钥 | 否（首次启动自动生成） |
+| `PLAYWRIGHT_PROXY_URL` | Playwright 浏览器代理 URL，如 `socks5://user:pass@host:port` | 否 |
+| `PLAYWRIGHT_PROXY_BYPASS` | Playwright 代理绕过列表，如 `localhost,127.0.0.1` | 否 |
 | `AUTO_CHECK_THRESHOLD` | 额度低于此百分比触发轮转 | 否（默认 `10`） |
 | `AUTO_CHECK_INTERVAL` | 巡检间隔（秒） | 否（默认 `300`） |
 | `AUTO_CHECK_MIN_LOW` | 至少几个账号低于阈值才触发 | 否（默认 `2`） |
+
+## Playwright 代理
+
+AutoTeam 的浏览器流量（ChatGPT 登录、邀请接受、Codex OAuth 等）现在支持单独配置代理。
+
+推荐优先使用一个环境变量：
+
+```dotenv
+PLAYWRIGHT_PROXY_URL=socks5://host.docker.internal:1080
+PLAYWRIGHT_PROXY_BYPASS=localhost,127.0.0.1
+```
+
+如果代理需要认证，也可以直接写进 URL：
+
+```dotenv
+PLAYWRIGHT_PROXY_URL=socks5://username:password@host.docker.internal:1080
+```
+
+说明：
+
+- `PLAYWRIGHT_PROXY_URL` 会被解析为 Playwright 所需的 `server` / `username` / `password` 字段
+- `PLAYWRIGHT_PROXY_BYPASS` 建议至少包含 `localhost,127.0.0.1`，避免本地回调或容器内本地服务误走代理
 
 ### 内联注释
 

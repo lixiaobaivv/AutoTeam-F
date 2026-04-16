@@ -40,10 +40,11 @@ AUTO_CHECK_INTERVAL=300  # 5 分钟
 ### Codex OAuth 登录失败：未获取到 authorization code
 
 常见原因：
-1. **IP 被标记** — VPS 的 IP 被 OpenAI / Cloudflare 拦截，建议换住宅代理
+1. **IP 被标记** — VPS 的 IP 被 OpenAI/Cloudflare 拦截，建议换住宅代理
 2. **Cloudflare 验证** — 浏览器环境被检测，需更新 Chromium 或切换网络
 3. **workspace 选择失败** — 页面结构变化，查看 `screenshots/codex_04_*.png`
 4. **自动回调不可达** — 如果浏览器和 AutoTeam 不在同一台机器，`localhost:1455` 回调可能不会到达 AutoTeam，此时请改用手动粘贴回调 URL
+5. **本地回调被代理拦截** — 如果启用了 `PLAYWRIGHT_PROXY_URL`，建议同时设置 `PLAYWRIGHT_PROXY_BYPASS=localhost,127.0.0.1`
 
 ### 登录后 plan 显示 free 而不是 team
 
@@ -165,6 +166,28 @@ sudo chmod -R 777 data/
 ```yaml
 volumes:
   - ./data:/app/data
+```
+
+### 容器里访问不到宿主机 SOCKS5 代理
+
+如果代理在宿主机上，比如 `host.docker.internal:1080`，Linux Docker 需要给容器补一条 host-gateway 映射：
+
+```yaml
+extra_hosts:
+  - "host.docker.internal:host-gateway"
+```
+
+然后在 `data/.env` 中配置：
+
+```dotenv
+PLAYWRIGHT_PROXY_URL=socks5://host.docker.internal:1080
+PLAYWRIGHT_PROXY_BYPASS=localhost,127.0.0.1
+```
+
+如果代理需要认证，可以直接写成：
+
+```dotenv
+PLAYWRIGHT_PROXY_URL=socks5://username:password@host.docker.internal:1080
 ```
 
 ## Web 面板相关
