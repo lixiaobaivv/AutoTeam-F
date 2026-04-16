@@ -1086,7 +1086,13 @@ def post_account_login(params: LoginAccountParams):
     def _run():
         from autoteam.accounts import STATUS_ACTIVE, update_account
         from autoteam.cloudmail import CloudMailClient
-        from autoteam.codex_auth import check_codex_quota, login_codex_via_browser, save_auth_file
+        from autoteam.codex_auth import (
+            check_codex_quota,
+            login_codex_via_browser,
+            quota_result_quota_info,
+            quota_result_resets_at,
+            save_auth_file,
+        )
 
         mail_client = CloudMailClient()
         mail_client.login()
@@ -1103,6 +1109,16 @@ def post_account_login(params: LoginAccountParams):
                     st, info = check_codex_quota(token)
                     if st == "ok" and isinstance(info, dict):
                         update_account(email, last_quota=info)
+                    elif st == "exhausted":
+                        quota_info = quota_result_quota_info(info)
+                        if quota_info:
+                            update_account(email, last_quota=quota_info)
+                        update_account(
+                            email,
+                            status="exhausted",
+                            quota_exhausted_at=time.time(),
+                            quota_resets_at=quota_result_resets_at(info) or int(time.time() + 18000),
+                        )
             # 同步到 CPA
             from autoteam.cpa_sync import sync_to_cpa
 
@@ -1118,7 +1134,7 @@ def post_account_login(params: LoginAccountParams):
 def get_status():
     """获取所有账号状态 + active 账号实时额度"""
     from autoteam.accounts import STATUS_ACTIVE, STATUS_EXHAUSTED, STATUS_PENDING, STATUS_STANDBY, load_accounts
-    from autoteam.codex_auth import check_codex_quota
+    from autoteam.codex_auth import check_codex_quota, quota_result_quota_info
 
     accounts = load_accounts()
     quota_cache = {}
@@ -1132,6 +1148,10 @@ def get_status():
                     status, info = check_codex_quota(access_token)
                     if status == "ok" and isinstance(info, dict):
                         quota_cache[acc["email"]] = info
+                    elif status == "exhausted":
+                        quota_info = quota_result_quota_info(info)
+                        if quota_info:
+                            quota_cache[acc["email"]] = quota_info
             except Exception:
                 pass
 

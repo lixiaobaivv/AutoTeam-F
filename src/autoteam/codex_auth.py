@@ -1494,10 +1494,81 @@ def refresh_main_auth_file():
     }
 
 
+def quota_result_quota_info(info):
+    """从 check_codex_quota 返回值中提取额度快照。"""
+    if not isinstance(info, dict):
+        return None
+    quota_info = info.get("quota_info")
+    if isinstance(quota_info, dict):
+        return quota_info
+    if "primary_pct" in info or "weekly_pct" in info:
+        return info
+    return None
+
+
+def quota_result_resets_at(info):
+    """从 check_codex_quota 返回值中提取恢复时间。"""
+    if isinstance(info, dict):
+        value = info.get("resets_at")
+    else:
+        value = info
+
+    try:
+        return int(value or 0)
+    except Exception:
+        return 0
+
+
+def get_quota_exhausted_info(quota_info, *, limit_reached=False):
+    """根据额度快照判断是否已耗尽，并返回耗尽详情。"""
+    if not isinstance(quota_info, dict):
+        return None
+
+    primary_pct = int(quota_info.get("primary_pct", 0) or 0)
+    weekly_pct = int(quota_info.get("weekly_pct", 0) or 0)
+    primary_reset = int(quota_info.get("primary_resets_at", 0) or 0)
+    weekly_reset = int(quota_info.get("weekly_resets_at", 0) or 0)
+
+    primary_exhausted = primary_pct >= 100
+    weekly_exhausted = weekly_pct >= 100
+    if not (limit_reached or primary_exhausted or weekly_exhausted):
+        return None
+
+    reset_candidates = []
+    if primary_exhausted and primary_reset:
+        reset_candidates.append(primary_reset)
+    if weekly_exhausted and weekly_reset:
+        reset_candidates.append(weekly_reset)
+
+    if not reset_candidates:
+        if primary_reset:
+            reset_candidates.append(primary_reset)
+        if weekly_reset:
+            reset_candidates.append(weekly_reset)
+
+    resets_at = max(reset_candidates) if reset_candidates else int(time.time() + 18000)
+
+    if primary_exhausted and weekly_exhausted:
+        window = "combined"
+    elif weekly_exhausted:
+        window = "weekly"
+    elif primary_exhausted:
+        window = "primary"
+    else:
+        window = "limit"
+
+    return {
+        "window": window,
+        "resets_at": resets_at,
+        "quota_info": quota_info,
+        "limit_reached": bool(limit_reached),
+    }
+
+
 def check_codex_quota(access_token, account_id=None):
     """
     通过 /backend-api/wham/usage 查询 Codex 额度状态，不消耗额度。
-    返回 ("ok", quota_info) | ("exhausted", resets_at) | ("auth_error", None)
+    返回 ("ok", quota_info) | ("exhausted", exhausted_info) | ("auth_error", None)
     quota_info = {"primary_pct": int, "primary_resets_at": int, "weekly_pct": int, "weekly_resets_at": int}
     """
     import requests
@@ -1545,9 +1616,9 @@ def check_codex_quota(access_token, account_id=None):
         "weekly_resets_at": secondary.get("reset_at", 0),
     }
 
-    # limit_reached 或 5h 额度用完（100%）
-    if rate_limit.get("limit_reached") or quota_info["primary_pct"] >= 100:
-        return "exhausted", quota_info["primary_resets_at"] or (time.time() + 18000)
+    exhausted_info = get_quota_exhausted_info(quota_info, limit_reached=bool(rate_limit.get("limit_reached")))
+    if exhausted_info:
+        return "exhausted", exhausted_info
 
     return "ok", quota_info
 

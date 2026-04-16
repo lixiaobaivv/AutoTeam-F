@@ -40,7 +40,7 @@ from autoteam.accounts import (
     save_accounts,
     update_account,
 )
-from autoteam.admin_state import get_admin_state_summary, get_chatgpt_account_id
+from autoteam.admin_state import get_admin_email, get_admin_state_summary, get_chatgpt_account_id
 from autoteam.chatgpt_api import ChatGPTTeamAPI
 from autoteam.cloudmail import CloudMailClient
 from autoteam.codex_auth import (
@@ -48,8 +48,11 @@ from autoteam.codex_auth import (
     _click_primary_auth_button,
     _is_google_redirect,
     check_codex_quota,
+    get_quota_exhausted_info,
     get_saved_main_auth_file,
     login_codex_via_browser,
+    quota_result_quota_info,
+    quota_result_resets_at,
     refresh_access_token,
     refresh_main_auth_file,
     save_auth_file,
@@ -60,6 +63,14 @@ from autoteam.textio import read_text, write_text
 logger = logging.getLogger(__name__)
 
 MAIL_TIMEOUT = int(os.environ.get("MAIL_TIMEOUT", "180"))
+
+
+def _normalized_email(value: str | None) -> str:
+    return (value or "").strip().lower()
+
+
+def _is_main_account_email(email: str | None) -> bool:
+    return bool(_normalized_email(email)) and _normalized_email(email) == _normalized_email(get_admin_email())
 
 
 def sync_account_states(chatgpt_api=None):
@@ -116,6 +127,8 @@ def sync_account_states(chatgpt_api=None):
     # Team 中有我们域名但本地无记录的成员 → 自动添加
     if domain_suffix:
         for email in team_emails:
+            if _is_main_account_email(email):
+                continue
             if domain_suffix in email and email not in local_email_set:
                 accounts.append(
                     {
@@ -142,7 +155,7 @@ def sync_account_states(chatgpt_api=None):
             try:
                 auth_data = json.loads(read_text(auth_file))
                 email = auth_data.get("email", "").lower()
-                if not email or email in local_email_set:
+                if not email or email in local_email_set or _is_main_account_email(email):
                     continue
                 # 判断是否在 Team 中
                 in_team = email in team_emails
@@ -285,13 +298,17 @@ def cmd_status():
                 status, info = check_codex_quota(access_token)
                 if status == "ok" and isinstance(info, dict):
                     quota_cache[acc["email"]] = info
+                elif status == "exhausted":
+                    quota_info = quota_result_quota_info(info)
+                    if quota_info:
+                        quota_cache[acc["email"]] = quota_info
 
     _print_status_table(accounts, quota_cache)
 
 
 def _check_and_refresh(acc):
     """检查单个账号额度，401 时自动刷新 token。返回 (status_str, info)
-    info: exhausted 时为 resets_at，ok 时为 quota_info dict
+    info: exhausted 时为 exhausted_info，ok 时为 quota_info dict
     """
     email = acc["email"]
     auth_file = acc.get("auth_file")
@@ -391,7 +408,7 @@ def cmd_check():
 
         accounts = load_accounts()
 
-    all_active = [a for a in accounts if a["status"] == STATUS_ACTIVE]
+    all_active = [a for a in accounts if a["status"] == STATUS_ACTIVE and not _is_main_account_email(a.get("email"))]
 
     # 区分：有认证文件的 vs 无认证文件的
     active_with_auth = []
@@ -453,8 +470,22 @@ def cmd_check():
                 else:
                     logger.info("[%s] 额度可用", email)
             elif status_str == "exhausted":
-                resets_at = info
-                logger.warning("[%s] 额度已用完", email)
+                quota_info = quota_result_quota_info(info) or {}
+                resets_at = quota_result_resets_at(info) or int(time.time() + 18000)
+                if quota_info:
+                    update_account(email, last_quota=quota_info)
+                    p_remain = max(0, 100 - quota_info.get("primary_pct", 0))
+                    w_remain = max(0, 100 - quota_info.get("weekly_pct", 0))
+                    window = info.get("window") if isinstance(info, dict) else ""
+                    logger.warning(
+                        "[%s] %s额度已用完 - 5h剩余: %d%% | 周剩余: %d%%",
+                        email,
+                        "周" if window == "weekly" else "5h和周" if window == "combined" else "5h",
+                        p_remain,
+                        w_remain,
+                    )
+                else:
+                    logger.warning("[%s] 额度已用完", email)
                 update_account(
                     email,
                     status=STATUS_EXHAUSTED,
@@ -466,6 +497,18 @@ def cmd_check():
                 # token 失效，先看历史额度（重置时间已过的不算）
                 lq = acc.get("last_quota")
                 if lq:
+                    exhausted_info = get_quota_exhausted_info(lq)
+                    if exhausted_info:
+                        resets_at = quota_result_resets_at(exhausted_info) or int(time.time() + 18000)
+                        logger.warning("[%s] token 失效，但历史额度显示已用完，直接标记 exhausted", email)
+                        update_account(
+                            email,
+                            status=STATUS_EXHAUSTED,
+                            quota_exhausted_at=time.time(),
+                            quota_resets_at=resets_at,
+                        )
+                        exhausted_list.append(acc)
+                        continue
                     p_resets = lq.get("primary_resets_at", 0)
                     if not (p_resets and time.time() >= p_resets):
                         # 重置时间未过，历史数据有效
@@ -512,11 +555,14 @@ def cmd_check():
                 # 重新检查额度
                 status_str, info = _check_and_refresh(find_account(load_accounts(), email))
                 if status_str == "exhausted":
+                    quota_info = quota_result_quota_info(info)
+                    if quota_info:
+                        update_account(email, last_quota=quota_info)
                     update_account(
                         email,
                         status=STATUS_EXHAUSTED,
                         quota_exhausted_at=time.time(),
-                        quota_resets_at=info,
+                        quota_resets_at=quota_result_resets_at(info) or int(time.time() + 18000),
                     )
                     exhausted_list.append(acc)
                     logger.warning("[%s] 额度已用完", email)
@@ -549,6 +595,10 @@ def cmd_check():
 
 def remove_from_team(chatgpt_api, email, *, return_status=False):
     """将账号从 Team 中移除"""
+    if _is_main_account_email(email):
+        logger.warning("[Team] 跳过移除主号: %s", email)
+        return "failed" if return_status else False
+
     account_id = get_chatgpt_account_id()
     # 先获取成员列表找到 user_id
     path = f"/backend-api/accounts/{account_id}/users"
@@ -1604,7 +1654,9 @@ def cmd_rotate(target_seats=5):
     try:
         # 移出所有 exhausted 账号（包括之前已标记的）
         all_accounts = load_accounts()
-        all_exhausted = [a for a in all_accounts if a["status"] == STATUS_EXHAUSTED]
+        all_exhausted = [
+            a for a in all_accounts if a["status"] == STATUS_EXHAUSTED and not _is_main_account_email(a.get("email"))
+        ]
         initial_api_count = -1
         removed_now = 0
         already_absent_count = 0
@@ -1663,7 +1715,9 @@ def cmd_rotate(target_seats=5):
                 logger.info("[4/5] Team 超员 (%d/%d)，清理 %d 个多余成员...", current_count, TARGET, excess)
                 # 只移除本地管理的账号，优先移除额度最低的
                 all_accs = load_accounts()
-                local_active = [a for a in all_accs if a["status"] == STATUS_ACTIVE]
+                local_active = [
+                    a for a in all_accs if a["status"] == STATUS_ACTIVE and not _is_main_account_email(a.get("email"))
+                ]
                 # 按额度排序，额度低的优先移除
                 local_active.sort(key=lambda a: 100 - (a.get("last_quota") or {}).get("primary_pct", 0))
                 removed = 0
@@ -1685,7 +1739,7 @@ def cmd_rotate(target_seats=5):
 
         # 优先复用旧账号（先验证额度是否真的恢复了）
         filled = 0
-        standby_list = get_standby_accounts()
+        standby_list = [a for a in get_standby_accounts() if not _is_main_account_email(a.get("email"))]
         skipped = []
 
         for acc in standby_list:
@@ -1703,6 +1757,9 @@ def cmd_rotate(target_seats=5):
                     if access_token:
                         status_str, info = check_codex_quota(access_token)
                         if status_str == "exhausted":
+                            quota_info = quota_result_quota_info(info)
+                            if quota_info:
+                                update_account(email, last_quota=quota_info)
                             logger.info("[4/5] 跳过 %s（额度未恢复）", email)
                             skipped.append(acc)
                             continue
@@ -2106,7 +2163,7 @@ def cmd_cleanup(max_seats=None):
     """清理多余的 Team 成员，只移除本地 accounts.json 中管理的账号"""
     account_id = get_chatgpt_account_id()
     accounts = load_accounts()
-    local_emails = {a["email"].lower() for a in accounts}
+    local_emails = {a["email"].lower() for a in accounts if not _is_main_account_email(a.get("email"))}
 
     if not local_emails:
         logger.info("[清理] 本地无管理的账号，无需清理")
