@@ -72,6 +72,26 @@ class CloudMailClient:
         logger.info("[CloudMail] 临时邮箱已创建: %s (accountId=%s)", email, account_id)
         return account_id, email
 
+    def list_accounts(self, size=200):
+        """列出当前用户可见的邮箱账户。"""
+        resp = self._get(
+            "/account/list",
+            {
+                "accountId": 0,
+                "size": size,
+                "lastSort": 0,
+            },
+        )
+        if resp.get("code") != 200:
+            return []
+
+        data = resp.get("data") or []
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            return data.get("list", [])
+        return []
+
     @staticmethod
     def _normalize_email(value):
         return str(value or "").strip().lower()
@@ -88,6 +108,15 @@ class CloudMailClient:
             for acc in load_accounts():
                 if self._normalize_email(acc.get("email")) == target:
                     account_id = acc.get("cloudmail_account_id")
+                    if account_id:
+                        return account_id
+        except Exception:
+            pass
+
+        try:
+            for account in self.list_accounts():
+                if self._normalize_email(account.get("email")) == target:
+                    account_id = account.get("accountId")
                     if account_id:
                         return account_id
         except Exception:
@@ -144,6 +173,7 @@ class CloudMailClient:
             "/email/list",
             {
                 "accountId": account_id,
+                "allReceive": 0,
                 "type": 1,  # receive
                 "size": size,
                 "emailId": 0,
@@ -152,7 +182,40 @@ class CloudMailClient:
         )
         if resp["code"] != 200:
             return []
-        return resp["data"].get("list", [])
+
+        data = resp.get("data") or {}
+        emails = data.get("list", [])
+        if emails:
+            return emails
+
+        latest_emails = self.get_latest_emails(account_id)
+        if latest_emails:
+            logger.debug("[CloudMail] /email/list 为空，回退到 /email/latest (accountId=%s)", account_id)
+            return latest_emails[:size]
+        return []
+
+    def get_latest_emails(self, account_id, email_id=0, all_receive=0):
+        """获取指定账户的最新邮件详情。某些 CloudMail 部署只在该接口返回正文。"""
+        resp = self._get(
+            "/email/latest",
+            {
+                "emailId": email_id,
+                "accountId": account_id,
+                "allReceive": all_receive,
+            },
+        )
+        if resp.get("code") != 200:
+            return []
+
+        data = resp.get("data") or []
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            if isinstance(data.get("list"), list):
+                return data["list"]
+            if data.get("emailId"):
+                return [data]
+        return []
 
     def wait_for_email(self, to_email, timeout=None, sender_keyword=None):
         """轮询等待邮件到达（用 admin API 按收件人搜索）"""
