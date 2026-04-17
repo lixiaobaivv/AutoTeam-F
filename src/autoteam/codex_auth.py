@@ -20,6 +20,7 @@ from autoteam.admin_state import (
     get_chatgpt_workspace_name,
 )
 from autoteam.auth_storage import AUTH_DIR, ensure_auth_dir, ensure_auth_file_permissions
+from autoteam.config import get_playwright_launch_options
 from autoteam.textio import write_text
 
 logger = logging.getLogger(__name__)
@@ -265,10 +266,7 @@ def login_codex_via_browser(email, password, mail_client=None):
     auth_code = None
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-        )
+        browser = p.chromium.launch(**get_playwright_launch_options())
         context = browser.new_context(
             viewport={"width": 1280, "height": 800},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",

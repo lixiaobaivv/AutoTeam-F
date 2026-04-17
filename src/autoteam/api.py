@@ -74,6 +74,8 @@ class SetupConfig(BaseModel):
     CLOUDMAIL_DOMAIN: str = ""
     CPA_URL: str = "http://127.0.0.1:8317"
     CPA_KEY: str = ""
+    PLAYWRIGHT_PROXY_URL: str = ""
+    PLAYWRIGHT_PROXY_BYPASS: str = ""
     API_KEY: str = ""
 
 
@@ -105,8 +107,9 @@ def post_setup_save(config: SetupConfig):
     if not data.get("API_KEY"):
         data["API_KEY"] = _secrets.token_urlsafe(24)
 
+    clearable_fields = {"PLAYWRIGHT_PROXY_URL", "PLAYWRIGHT_PROXY_BYPASS"}
     for key, value in data.items():
-        if value:
+        if value or key in clearable_fields:
             _write_env(key, value)
             os.environ[key] = value
 

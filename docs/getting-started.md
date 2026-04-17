@@ -118,6 +118,26 @@ docker compose restart
 
 直接打开 `http://your-server:8787`，会显示配置向导页面，在浏览器中填写。
 
+如果你需要让浏览器流量走宿主机 SOCKS5 代理，在 Linux Docker 下还需要给容器增加：
+
+```yaml
+extra_hosts:
+  - "host.docker.internal:host-gateway"
+```
+
+然后在 `data/.env` 中加入：
+
+```dotenv
+PLAYWRIGHT_PROXY_URL=socks5://host.docker.internal:1080
+PLAYWRIGHT_PROXY_BYPASS=localhost,127.0.0.1
+```
+
+如果代理需要认证，可以写成：
+
+```dotenv
+PLAYWRIGHT_PROXY_URL=socks5://username:password@host.docker.internal:1080
+```
+
 ## 第三步：管理员登录
 
 配置完成后，需要先用 ChatGPT Team 管理员账号登录。

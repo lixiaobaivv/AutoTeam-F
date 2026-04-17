@@ -57,6 +57,7 @@ from autoteam.codex_auth import (
     refresh_main_auth_file,
     save_auth_file,
 )
+from autoteam.config import get_playwright_launch_options
 from autoteam.cpa_sync import sync_from_cpa, sync_main_codex_to_cpa, sync_to_cpa
 from autoteam.textio import read_text, write_text
 
@@ -665,10 +666,7 @@ def _complete_registration(email, password, invite_link, mail_client):
 
     logger.info("[注册] 开始注册 %s...", email)
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-        )
+        browser = p.chromium.launch(**get_playwright_launch_options())
         context = browser.new_context(
             viewport={"width": 1280, "height": 800},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
@@ -1140,13 +1138,9 @@ def _register_direct_once(mail_client, email, password, cloudmail_account_id=Non
     signup_url = "https://chatgpt.com/auth/login"
 
     with sync_playwright() as p:
-        launch_kwargs = {
-            "headless": False,
-            "args": ["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-        }
+        launch_kwargs = get_playwright_launch_options()
         if sys.platform.startswith("win"):
             launch_kwargs["slow_mo"] = 100
-
         browser = p.chromium.launch(**launch_kwargs)
         context = browser.new_context(
             viewport={"width": 1280, "height": 800},
@@ -1503,10 +1497,7 @@ def reinvite_account(chatgpt_api, mail_client, acc):
         chatgpt_api.stop()
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-        )
+        browser = p.chromium.launch(**get_playwright_launch_options())
         context = browser.new_context(
             viewport={"width": 1280, "height": 800},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
