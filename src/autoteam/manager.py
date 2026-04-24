@@ -2038,6 +2038,12 @@ def reinvite_account(chatgpt_api, mail_client, acc):
     """
     恢复 standby 账号 — 复用统一的 Codex OAuth 登录流程。
     只有拿到 team plan 的认证结果，才视为恢复成功。
+
+    OAuth 失败(bundle=None)或 plan_type != team 时,必须立刻 kick 残留 Team 成员:
+    reinvite 链路(invite → OAuth)的 invite 阶段往往已成功,只有 OAuth 这一步掉队,
+    如果不 kick,账号就留在 Team 里占席位,本地却写 standby —— 这正是"假 standby"
+    的典型成因。不 kick 的话,下一轮 rotate [4/5] 又会从 standby 选中它 reinvite,
+    同样失败,死循环占席位。
     """
     email = acc["email"]
     password = acc.get("password", "")
@@ -2049,14 +2055,32 @@ def reinvite_account(chatgpt_api, mail_client, acc):
         chatgpt_api.stop()
 
     bundle = login_codex_via_browser(email, password, mail_client=mail_client)
+
+    def _cleanup_team_leftover(reason):
+        """OAuth 失败/plan 不对时,兜底 kick 账号,避免假 standby。"""
+        try:
+            if not chatgpt_api.browser:
+                chatgpt_api.start()
+            kick_status = remove_from_team(chatgpt_api, email, return_status=True)
+            if kick_status == "removed":
+                logger.info("[轮转] OAuth 失败(%s),已 kick 残留 Team 成员: %s", reason, email)
+            elif kick_status == "already_absent":
+                logger.info("[轮转] OAuth 失败(%s),确认 %s 不在 Team", reason, email)
+            else:
+                logger.warning("[轮转] OAuth 失败(%s)后 kick %s 返回 status=%s", reason, email, kick_status)
+        except Exception as exc:
+            logger.warning("[轮转] OAuth 失败后 kick %s 抛异常(留给下次对账兜底): %s", email, exc)
+
     if not bundle:
         logger.warning("[轮转] 旧账号 OAuth 登录失败，保持 standby: %s", email)
+        _cleanup_team_leftover("no_bundle")
         update_account(email, status=STATUS_STANDBY)
         return False
 
     plan_type = (bundle.get("plan_type") or "").lower()
     if plan_type != "team":
         logger.warning("[轮转] 旧账号登录后 plan=%s，不是 team，恢复失败: %s", plan_type or "unknown", email)
+        _cleanup_team_leftover(f"plan={plan_type or 'unknown'}")
         update_account(email, status=STATUS_STANDBY)
         return False
 
