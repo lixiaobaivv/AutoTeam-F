@@ -1990,10 +1990,9 @@ def _auto_check_loop():
     while not _auto_check_stop.is_set():
         cfg = _auto_check_config
         logger.info(
-            "[巡检] 等待 %d 分钟后执行下一轮检查（阈值: %d%%, 触发: >=%d 个）",
+            "[巡检] 等待 %d 分钟后执行下一轮检查（阈值: %d%%, 模式: 任意失效立即 1v1 替换）",
             cfg["interval"] // 60,
             cfg["threshold"],
-            cfg["min_low"],
         )
 
         # 等待 interval 秒，期间可被 restart 或 stop 唤醒
@@ -2097,10 +2096,9 @@ def set_auto_check_config(cfg: AutoCheckConfig):
     _auto_check_config["min_low"] = max(1, cfg.min_low)
     _auto_check_restart.set()  # 唤醒巡检线程，立即应用新配置
     logger.info(
-        "[巡检] 配置已更新: 间隔=%ds 阈值=%d%% 触发=%d个",
+        "[巡检] 配置已更新: 间隔=%ds 阈值=%d%%（min_low 已废弃,任意失效立即 1v1 替换）",
         _auto_check_config["interval"],
         _auto_check_config["threshold"],
-        _auto_check_config["min_low"],
     )
     return _auto_check_config.copy()
 
