@@ -31,8 +31,10 @@ from autoteam.accounts import (
     STATUS_ACTIVE,
     STATUS_EXHAUSTED,
     STATUS_PENDING,
+    STATUS_PERSONAL,
     STATUS_STANDBY,
     add_account,
+    delete_account,
     find_account,
     get_standby_accounts,
     load_accounts,
@@ -58,6 +60,8 @@ from autoteam.codex_auth import (
 )
 from autoteam.config import get_playwright_launch_options
 from autoteam.cpa_sync import sync_from_cpa, sync_main_codex_to_cpa, sync_to_cpa
+from autoteam.identity import random_age, random_birthday, random_full_name, random_password
+from autoteam.register_failures import record_failure
 from autoteam.textio import read_text, write_text
 
 logger = logging.getLogger(__name__)
@@ -681,8 +685,90 @@ def invite_to_team(chatgpt_api, email, seat_type="default"):
     return status == 200
 
 
-def _complete_registration(email, password, invite_link, mail_client):
-    """完成注册 + Codex 登录（从已有邀请链接继续）"""
+def _run_post_register_oauth(email, password, mail_client, leave_workspace=False, out_outcome=None):
+    """
+    注册（加入 Team）成功后统一的收尾流程：
+    - leave_workspace=False: 直接跑 Team 模式 Codex OAuth，状态置为 ACTIVE
+    - leave_workspace=True: 主号 API 踢出子账号 → 走 personal 模式 OAuth → 保存 free plan 认证，状态置为 PERSONAL
+
+    返回 email 表示账号已入账号池；None 表示流程失败。
+    out_outcome: 可选 dict，函数内会写入 `{status, email, reason, ...}` 供上游统计/汇总。
+    """
+
+    def _record_outcome(status, **extra):
+        if out_outcome is not None:
+            out_outcome.clear()
+            out_outcome.update(status=status, email=email, **extra)
+
+    if leave_workspace:
+        # 退出 Team 必须用主号权限，临时起一个 ChatGPTTeamAPI 实例完成 DELETE
+        logger.info("[注册] leave_workspace=True，先将 %s 从 Team 中移出...", email)
+        temp_api = ChatGPTTeamAPI()
+        remove_status = "failed"  # 防御：start() 抛异常时 finally 走完仍有确定值，避免 NameError
+        try:
+            temp_api.start()
+            remove_status = remove_from_team(temp_api, email, return_status=True)
+        except Exception as exc:
+            logger.error("[注册] 启动主号 API 或移出 Team 时出错: %s", exc)
+        finally:
+            temp_api.stop()
+
+        if remove_status not in ("removed", "already_absent"):
+            logger.error("[注册] 无法将 %s 移出 Team（status=%s），放弃 personal OAuth", email, remove_status)
+            # 没能踢出 → 账号还在 Team 里，保留为 standby 由下次轮转接手
+            update_account(email, status=STATUS_STANDBY)
+            record_failure(email, "kick_failed", f"remove_from_team status={remove_status}")
+            _record_outcome("kick_failed", reason=f"主号踢出失败 status={remove_status}")
+            return None
+
+        bundle = login_codex_via_browser(email, password, mail_client=mail_client, use_personal=True)
+        if bundle:
+            auth_file = save_auth_file(bundle)
+            update_account(
+                email,
+                status=STATUS_PERSONAL,
+                auth_file=auth_file,
+                last_active_at=time.time(),
+            )
+            logger.info("[注册] 免费号就绪: %s (plan=%s)", email, bundle.get("plan_type"))
+            _record_outcome("success", plan=bundle.get("plan_type"))
+            return email
+
+        # personal OAuth 失败 — 不留僵尸 PERSONAL 记录：直接从 accounts.json 删除，失败明细写 register_failures.json
+        # 用户能在失败日志里看到发生了什么（哪个 email / 是什么阶段 / 什么时候），账号列表保持干净
+        logger.error(
+            "[注册] %s 已退出 Team 但 personal Codex OAuth 未返回认证 bundle，从账号池删除",
+            email,
+        )
+        delete_account(email)
+        record_failure(
+            email,
+            "oauth_failed",
+            "已退出 Team 但 personal Codex OAuth 登录未返回 bundle",
+            stage="post_leave_workspace",
+        )
+        _record_outcome("oauth_failed", reason="personal Codex OAuth 未返回 bundle")
+        return None
+
+    # 原有 Team 流程
+    bundle = login_codex_via_browser(email, password, mail_client=mail_client)
+    if bundle:
+        auth_file = save_auth_file(bundle)
+        update_account(email, status=STATUS_ACTIVE, auth_file=auth_file, last_active_at=time.time())
+        logger.info("[注册] 账号就绪: %s", email)
+        _record_outcome("success", plan=bundle.get("plan_type"))
+        return email
+    # 部分成功：账号已入 Team(席位被占用)但 auth_file 缺失,需要用户手动"补登录"。
+    # 上游 cmd_fill 依 `if email: produced+=1` 按席位计数,所以这里仍返回 email;
+    # outcome 打 team_auth_missing 让汇总能显示"这批里有 X 个需要补登录"。
+    update_account(email, status=STATUS_ACTIVE)
+    logger.warning("[注册] 账号已加入 Team 但 Codex 登录失败,需要补登录: %s", email)
+    _record_outcome("team_auth_missing", reason="已入 Team 席位但 Codex OAuth 未返回 bundle,需要补登录")
+    return email
+
+
+def _complete_registration(email, password, invite_link, mail_client, *, leave_workspace=False, out_outcome=None):
+    """完成注册 + Codex 登录（从已有邀请链接继续）。out_outcome 透传给 _run_post_register_oauth。"""
     from playwright.sync_api import sync_playwright
 
     from autoteam.invite import register_with_invite
@@ -700,28 +786,25 @@ def _complete_registration(email, password, invite_link, mail_client):
 
     if not result:
         logger.error("[注册] 注册 %s 失败", email)
+        if out_outcome is not None:
+            out_outcome["status"] = "register_failed"
+            out_outcome["reason"] = "invite 注册链路失败（register_with_invite 返回 False）"
+            out_outcome["last_email"] = email
         return None
 
-    # Codex 登录
-    bundle = login_codex_via_browser(email, password, mail_client=mail_client)
-    if bundle:
-        auth_file = save_auth_file(bundle)
-        update_account(email, status=STATUS_ACTIVE, auth_file=auth_file, last_active_at=time.time())
-        logger.info("[注册] 账号就绪: %s", email)
-        return email
-    else:
-        update_account(email, status=STATUS_ACTIVE)
-        logger.warning("[注册] 账号已加入 Team 但 Codex 登录失败: %s", email)
-        return email
+    return _run_post_register_oauth(
+        email, password, mail_client, leave_workspace=leave_workspace, out_outcome=out_outcome
+    )
 
 
-def _check_pending_invites(chatgpt_api, mail_client):
+def _check_pending_invites(chatgpt_api, mail_client, *, leave_workspace=False, out_outcome=None):
     """
     检查 pending invites 中是否有已收到邮件的邀请，有则继续完成注册。
+    leave_workspace: 注册成功后是否自动退出 Team 走 personal OAuth。
+    out_outcome:     透传给 _complete_registration / _run_post_register_oauth，
+                     让上游（_cmd_fill_personal）能拿到 kick_failed / oauth_failed 的分类。
     返回成功完成的邮箱列表。
     """
-    import uuid
-
     account_id = get_chatgpt_account_id()
     result = chatgpt_api._api_fetch("GET", f"/backend-api/accounts/{account_id}/invites")
     if result["status"] != 200:
@@ -759,15 +842,18 @@ def _check_pending_invites(chatgpt_api, mail_client):
         # 确保本地有账号记录
         acc = find_account(load_accounts(), inv_email)
         if acc:
-            password = acc.get("password", f"Tmp_{uuid.uuid4().hex[:12]}!")
+            password = acc.get("password") or random_password()
         else:
-            password = f"Tmp_{uuid.uuid4().hex[:12]}!"
+            password = random_password()
             add_account(inv_email, password)
 
         # 关闭 ChatGPT 浏览器再注册
         chatgpt_api.stop()
 
-        email = _complete_registration(inv_email, password, invite_link, mail_client)
+        email = _complete_registration(
+            inv_email, password, invite_link, mail_client,
+            leave_workspace=leave_workspace, out_outcome=out_outcome,
+        )
         if email:
             completed.append(email)
 
@@ -923,12 +1009,13 @@ def _infer_date_spinbutton_kind(meta):
     return None
 
 
-def _fill_about_you_birthday_by_meta(page):
+def _fill_about_you_birthday_by_meta(page, desired=None):
     metas = _collect_date_spinbutton_meta(page)
     if len(metas) < 3:
         return False
 
-    desired = {"year": "1995", "month": "06", "day": "15"}
+    if not desired:
+        desired = random_birthday()
     kind_to_meta = {}
 
     for meta in metas:
@@ -1037,10 +1124,16 @@ def _complete_direct_about_you(page):
     if "about-you" not in (page.url or "").lower():
         return True
 
+    # 本账号整个注册周期内固定一份身份数据，避免多次点提交导致生日漂移
+    identity_bday = random_birthday()
+    identity_name = random_full_name()
+    identity_age = random_age()
+
+    # 字段顺序只尝试 3 种排列，但全部使用相同的随机生日值
     birthday_orders = [
-        ("1995", "06", "15"),
-        ("06", "15", "1995"),
-        ("15", "06", "1995"),
+        (identity_bday["year"], identity_bday["month"], identity_bday["day"]),
+        (identity_bday["month"], identity_bday["day"], identity_bday["year"]),
+        (identity_bday["day"], identity_bday["month"], identity_bday["year"]),
     ]
 
     for attempt, values in enumerate(birthday_orders, 1):
@@ -1052,7 +1145,8 @@ def _complete_direct_about_you(page):
             if name_input.is_visible(timeout=2000):
                 try:
                     if name_input.is_editable(timeout=500):
-                        name_input.fill("User")
+                        name_input.fill(identity_name)
+                        logger.info("[直接注册] 填入姓名: %s", identity_name)
                         time.sleep(0.3)
                 except Exception:
                     pass
@@ -1066,7 +1160,7 @@ def _complete_direct_about_you(page):
             spinbuttons = []
 
         if len(spinbuttons) >= 3:
-            filled = _fill_about_you_birthday_by_meta(page)
+            filled = _fill_about_you_birthday_by_meta(page, desired=identity_bday)
             if not filled:
                 for label_sel in ("text=生日日期", "text=Date of birth"):
                     try:
@@ -1096,8 +1190,8 @@ def _complete_direct_about_you(page):
                     'input[name="age"], input[placeholder*="年龄"], input[placeholder*="Age"]'
                 ).first
                 if age_input.is_visible(timeout=2000) and age_input.is_editable(timeout=500):
-                    age_input.fill("25")
-                    logger.info("[直接注册] 填入年龄: 25")
+                    age_input.fill(identity_age)
+                    logger.info("[直接注册] 填入年龄: %s", identity_age)
             except Exception:
                 pass
 
@@ -1130,6 +1224,12 @@ def _complete_direct_about_you(page):
             timeout=12,
         )
         logger.info("[直接注册] 提交资料后状态: %s | URL: %s", next_step, page.url)
+
+        # 提交 about-you 后最容易撞 add-phone：这里直接检测并 raise，让上层放弃账号
+        from autoteam.invite import assert_not_blocked  # 局部导入避开循环
+
+        assert_not_blocked(page, "about_you_submit")
+
         if next_step != "profile":
             return True
 
@@ -1138,8 +1238,14 @@ def _complete_direct_about_you(page):
 
 
 def _register_direct_once(mail_client, email, password, cloudmail_account_id=None):
-    """执行一次直接注册，返回是否完成注册并进入 Team。"""
+    """执行一次直接注册，返回是否完成注册并进入 Team。
+
+    在邮箱/密码/验证码/about-you 四个提交节点调用 assert_not_blocked，
+    一旦命中 add-phone / duplicate 就抛 RegisterBlocked，由 create_account_direct 分流处理。
+    """
     from playwright.sync_api import sync_playwright
+
+    from autoteam.invite import RegisterBlocked, assert_not_blocked
 
     logger.info("[直接注册] %s", email)
     signup_url = "https://chatgpt.com/auth/login"
@@ -1284,6 +1390,12 @@ def _register_direct_once(mail_client, email, password, cloudmail_account_id=Non
             browser.close()
             return False
 
+        try:
+            assert_not_blocked(page, "email_submit")
+        except RegisterBlocked:
+            browser.close()
+            raise
+
         # 等待页面跳转完成（可能跳到 create-account/password）
         password_step = _wait_for_direct_register_step(
             page,
@@ -1345,6 +1457,12 @@ def _register_direct_once(mail_client, email, password, cloudmail_account_id=Non
             browser.close()
             return False
 
+        try:
+            assert_not_blocked(page, "password_submit")
+        except RegisterBlocked:
+            browser.close()
+            raise
+
         code_input = None
         try:
             code_input = page.locator(_DIRECT_CODE_SELECTORS).first
@@ -1384,7 +1502,17 @@ def _register_direct_once(mail_client, email, password, cloudmail_account_id=Non
         logger.info("[直接注册] 当前 URL: %s", page.url)
 
         try:
+            assert_not_blocked(page, "code_submit")
+        except RegisterBlocked:
+            browser.close()
+            raise
+
+        try:
             _complete_direct_about_you(page)
+        except RegisterBlocked:
+            # add-phone / duplicate 必须穿透给 create_account_direct 处理
+            browser.close()
+            raise
         except Exception as exc:
             logger.warning("[直接注册] about-you 步骤异常: %s | URL: %s", exc, page.url)
 
@@ -1412,20 +1540,116 @@ def _register_direct_once(mail_client, email, password, cloudmail_account_id=Non
         return success
 
 
-def create_account_direct(mail_client):
+def create_account_direct(mail_client, *, leave_workspace=False, out_outcome=None):
     """
     直接注册模式（域名已配置自动加入 workspace，不需要邀请）。
     流程：创建邮箱 → 注册 ChatGPT → 自动加入 workspace → Codex 登录
+    leave_workspace: 加入 workspace 后是否立即退出，转为 personal 模式跑 OAuth。
+    out_outcome:     可选 dict，函数会把最终结局（success/phone_blocked/duplicate_exhausted/register_failed/...）
+                     + 统计信息（register_attempts / duplicate_swaps / last_email / reason）写入，供上游汇总。
+
+    捕获 RegisterBlocked：
+    - is_phone=True:     当前邮箱已暴露给 OpenAI，立即删邮箱、整个账号放弃（return None）
+    - is_duplicate=True: 换个临时邮箱继续尝试，独立计数不消耗 register_attempts
+    - 其他异常:          归入现有 retry 计数
     """
-    import uuid
+    from autoteam.invite import RegisterBlocked
 
     account_id, email = mail_client.create_temp_email()
-    password = f"Tmp_{uuid.uuid4().hex[:12]}!"
+    password = random_password()
 
+    def _record_outcome(status, **extra):
+        if out_outcome is not None:
+            out_outcome.clear()
+            out_outcome.update(
+                status=status,
+                last_email=email,
+                register_attempts=register_attempts,
+                duplicate_swaps=duplicate_swaps,
+                **extra,
+            )
+
+    def _discard_email(reason):
+        try:
+            mail_client.delete_account(account_id)
+        except Exception as exc:
+            logger.warning("[直接注册] 删除 %s 的临时邮箱失败（%s）: %s", reason, email, exc)
+
+    # 注册失败（非 duplicate）最多重试 3 次；duplicate 额外独立上限，防止 CloudMail 异常导致无限换邮箱
     success = False
-    for attempt in range(3):
-        logger.info("[直接注册] 开始第 %d/3 次注册尝试: %s", attempt + 1, email)
-        success = _register_direct_once(mail_client, email, password, cloudmail_account_id=account_id)
+    MAX_REGISTER_ATTEMPTS = 3
+    MAX_DUPLICATE_SWAPS = 5
+    register_attempts = 0
+    duplicate_swaps = 0
+    while register_attempts < MAX_REGISTER_ATTEMPTS:
+        logger.info(
+            "[直接注册] 开始注册尝试: %s（已试 %d/%d，duplicate 换邮箱 %d/%d）",
+            email,
+            register_attempts,
+            MAX_REGISTER_ATTEMPTS,
+            duplicate_swaps,
+            MAX_DUPLICATE_SWAPS,
+        )
+        try:
+            success = _register_direct_once(mail_client, email, password, cloudmail_account_id=account_id)
+        except RegisterBlocked as blocked:
+            logger.error("[直接注册] %s 被阻断: %s", email, blocked)
+            if blocked.is_phone:
+                # 用户明确要求：不绕 add-phone，直接放弃本账号
+                _discard_email("phone_block")
+                record_failure(
+                    email,
+                    "phone_blocked",
+                    f"add-phone 手机验证（step={blocked.step}）",
+                    step=blocked.step,
+                    register_attempts=register_attempts,
+                    duplicate_swaps=duplicate_swaps,
+                )
+                _record_outcome("phone_blocked", reason=f"add-phone 手机验证 step={blocked.step}", step=blocked.step)
+                return None
+            if blocked.is_duplicate:
+                # 邮箱重复 → 换一个全新的临时邮箱再来，不计入 register_attempts
+                duplicate_swaps += 1
+                if duplicate_swaps > MAX_DUPLICATE_SWAPS:
+                    logger.error("[直接注册] duplicate 换邮箱已达上限 %d，放弃", MAX_DUPLICATE_SWAPS)
+                    _discard_email("duplicate_exhausted")
+                    record_failure(
+                        email,
+                        "duplicate_exhausted",
+                        f"duplicate 换邮箱已达上限 {MAX_DUPLICATE_SWAPS}",
+                        duplicate_swaps=duplicate_swaps,
+                    )
+                    _record_outcome(
+                        "duplicate_exhausted",
+                        reason=f"duplicate 换邮箱 {duplicate_swaps} 次仍失败",
+                    )
+                    return None
+                _discard_email("duplicate")
+                account_id, email = mail_client.create_temp_email()
+                password = random_password()
+                logger.info("[直接注册] 已换新临时邮箱: %s", email)
+                continue
+            # 其他阻断按普通失败处理
+            success = False
+        except Exception as exc:
+            # Playwright 崩溃 / 网络异常等:不清理邮箱会让 CloudMail 积压,必须补一刀 discard 再抛。
+            logger.error(
+                "[直接注册] %s 注册时发生未分类异常,discard 邮箱后向上抛: %s", email, exc,
+            )
+            _discard_email("exception")
+            record_failure(
+                email,
+                "exception",
+                f"_register_direct_once 抛非 RegisterBlocked 异常: {exc}",
+                register_attempts=register_attempts,
+                duplicate_swaps=duplicate_swaps,
+            )
+            _record_outcome("exception", reason=f"未分类异常: {exc}")
+            raise
+
+        # 只有真正走完 _register_direct_once 的一次（无论成功失败）才消耗 register_attempts
+        register_attempts += 1
+
         if success:
             break
 
@@ -1434,42 +1658,53 @@ def create_account_direct(mail_client):
             success = True
             break
 
-        if attempt < 2:
+        if register_attempts < MAX_REGISTER_ATTEMPTS:
             logger.warning("[直接注册] 注册失败且账号不在 Team 中，60 秒后重试: %s", email)
             time.sleep(60)
 
     if not success:
-        logger.error("[直接注册] 连续 3 次注册失败，删除临时账号: %s", email)
-        try:
-            mail_client.delete_account(account_id)
-        except Exception as exc:
-            logger.warning("[直接注册] 删除失败临时邮箱异常: %s", exc)
+        logger.error(
+            "[直接注册] %s 多次注册失败（register_attempts=%d, duplicate_swaps=%d），删除临时账号",
+            email,
+            register_attempts,
+            duplicate_swaps,
+        )
+        _discard_email("register_failed")
+        record_failure(
+            email,
+            "register_failed",
+            f"连续 {register_attempts} 次注册尝试均未进入 Team",
+            register_attempts=register_attempts,
+            duplicate_swaps=duplicate_swaps,
+        )
+        _record_outcome("register_failed", reason=f"注册 {register_attempts} 次均未进入 Team")
         return None
 
     add_account(email, password, cloudmail_account_id=account_id)
 
-    # Step 4: Codex 登录
-    bundle = login_codex_via_browser(email, password, mail_client=mail_client)
-    if bundle:
-        auth_file = save_auth_file(bundle)
-        update_account(email, status=STATUS_ACTIVE, auth_file=auth_file, last_active_at=time.time())
-        logger.info("[直接注册] 账号就绪: %s", email)
-        return email
-    else:
-        update_account(email, status=STATUS_ACTIVE)
-        logger.warning("[直接注册] 账号已加入 Team 但 Codex 登录失败: %s", email)
-        return email
+    return _run_post_register_oauth(
+        email,
+        password,
+        mail_client,
+        leave_workspace=leave_workspace,
+        out_outcome=out_outcome,
+    )
 
 
-def create_new_account(chatgpt_api, mail_client):
+def create_new_account(chatgpt_api, mail_client, *, leave_workspace=False, out_outcome=None):
     """
     创建新账号。优先用直接注册模式（域名自动加入 workspace）。
     chatgpt_api 可为 None（直接注册不需要）。
+    leave_workspace: 注册成功后是否退出 Team 走 personal OAuth。
+    out_outcome:     透传给 create_account_direct 的可选统计容器。
     """
     # 先检查 pending invites
     if chatgpt_api and chatgpt_api.browser:
         logger.info("[创建] 先检查 pending invites...")
-        completed = _check_pending_invites(chatgpt_api, mail_client)
+        completed = _check_pending_invites(
+            chatgpt_api, mail_client,
+            leave_workspace=leave_workspace, out_outcome=out_outcome,
+        )
         if completed:
             logger.info("[创建] 从 pending invites 完成了 %d 个账号", len(completed))
             return completed[0]
@@ -1478,7 +1713,7 @@ def create_new_account(chatgpt_api, mail_client):
     logger.info("[创建] 使用直接注册模式...")
     if chatgpt_api and chatgpt_api.browser:
         chatgpt_api.stop()
-    return create_account_direct(mail_client)
+    return create_account_direct(mail_client, leave_workspace=leave_workspace, out_outcome=out_outcome)
 
 
 def reinvite_account(chatgpt_api, mail_client, acc):
@@ -1650,7 +1885,12 @@ def cmd_rotate(target_seats=5):
         quota_skipped = []
         auto_reuse_skipped = []
 
+        from autoteam import cancel_signal
+
         for acc in standby_list:
+            if cancel_signal.is_cancelled():
+                logger.warning("[轮转] 收到取消请求,中止 standby 复用阶段")
+                break
             if filled >= vacancies:
                 break
             email = acc["email"]
@@ -1758,6 +1998,9 @@ def cmd_rotate(target_seats=5):
             # 必须创建新号
             logger.info("[5/5] 创建 %d 个新账号...", remaining)
             for i in range(remaining):
+                if cancel_signal.is_cancelled():
+                    logger.warning("[轮转] 收到取消请求,已创建 %d/%d 个新号", i, remaining)
+                    break
                 logger.info("[5/5] 创建第 %d/%d 个...", i + 1, remaining)
                 if not chatgpt or not chatgpt.browser:
                     ensure_chatgpt()
@@ -2030,8 +2273,15 @@ def get_team_member_count(chatgpt_api):
     return len(members)
 
 
-def cmd_fill(target=5):
-    """检测 Team 成员数，不足 target 则自动添加新账号补满"""
+def cmd_fill(target=5, leave_workspace=False):
+    """
+    补位流程。
+    leave_workspace=False: 补满 Team 席位到 target（原行为），优先复用 standby 旧号
+    leave_workspace=True:  按 target 作为"要生产的免费号数量"，每个账号注册后立刻退出 Team、走 personal OAuth
+    """
+    if leave_workspace:
+        return _cmd_fill_personal(target)
+
     chatgpt = ChatGPTTeamAPI()
     chatgpt.start()
     mail_client = CloudMailClient()
@@ -2058,7 +2308,12 @@ def cmd_fill(target=5):
         ]
         standby_index = 0
 
+        from autoteam import cancel_signal
+
         for i in range(need):
+            if cancel_signal.is_cancelled():
+                logger.warning("[填充] 收到取消请求,已完成 %d/%d", i, need)
+                break
             logger.info("[填充] 添加第 %d/%d 个账号...", i + 1, need)
 
             # 优先复用 standby 中额度已恢复的旧账号
@@ -2104,6 +2359,382 @@ def cmd_fill(target=5):
     finally:
         if chatgpt.browser:
             chatgpt.stop()
+
+
+def _summarize_outcomes(outcomes):
+    """把 outcome dict 列表按 status 聚合，返回 {status: count} 的 OrderedDict。"""
+    from collections import OrderedDict
+
+    counts = OrderedDict()
+    for o in outcomes:
+        st = (o or {}).get("status") or "unknown"
+        counts[st] = counts.get(st, 0) + 1
+    return counts
+
+
+def _fetch_team_non_master_emails(chatgpt_api):
+    """
+    一次性快照 Team 当前的非主号成员邮箱集合。返回 (ok, emails_set)。
+    ok=False 表示鉴权失败或网络问题,调用方可自行决定是重试还是放弃。
+
+    失败时主动 log 具体 status + body 前 200 字,方便用户直接看到根因
+    (401="session 失效"、0="playwright JS 抛错网络挂了"等)。
+    """
+    master_email = _normalized_email(get_admin_email())
+    account_id = get_chatgpt_account_id()
+    if not account_id:
+        logger.error("[免费号] account_id 为空,无法确认席位")
+        return False, set()
+    try:
+        result = chatgpt_api._api_fetch("GET", f"/backend-api/accounts/{account_id}/users")
+    except Exception as exc:
+        # Playwright 页面崩溃/context 被关掉等底层错误——不是 JS fetch 异常,JS 的 try/catch 接不住
+        logger.error("[免费号] 拉取 Team 成员列表抛异常(playwright 层): %s", exc)
+        return False, set()
+    status = result.get("status")
+    if status != 200:
+        body_excerpt = (result.get("body") or "")[:200].replace("\n", " ")
+        logger.error(
+            "[免费号] 拉取 Team 成员列表失败 status=%s body=%s "
+            "(可用 POST /api/admin/fix-account-id 自动修正 account_id,或重新导入 session_token)",
+            status,
+            body_excerpt,
+        )
+        return False, set()
+    try:
+        data = json.loads(result["body"])
+    except Exception as exc:
+        logger.error("[免费号] 成员列表 JSON 解析失败: %s body=%s", exc, (result.get("body") or "")[:200])
+        return False, set()
+    members = data.get("items", data.get("users", data.get("members", [])))
+    emails = {_normalized_email(m.get("email", "")) for m in members if m.get("email")}
+    emails.discard(master_email)
+    emails.discard("")
+    return True, emails
+
+
+def _wait_team_new_members_cleared(chatgpt_api, baseline_emails, max_wait=180, poll_interval=6):
+    """
+    等待"不在 baseline 里的新成员"全部被踢出。baseline 是进入 fill-personal 前就已经存在的
+    非主号成员(比如 Team fill 创建的真实 Team 子号,用户明确要求保留它们)。
+
+    返回 True: 新增成员已清空(可能还有 baseline 成员在,但那不归本任务管)。
+    返回 False: 超时仍有新增成员;或连续 401/403 鉴权失败。
+
+    风控背景:OpenAI 对批量邀请/踢人敏感,每批免费号(注册→主号踢出)完成后等后台真正
+    同步完成再开始下一批,避免短时间内大量操作触发风控。
+    """
+    from autoteam import cancel_signal
+
+    baseline_emails = {e for e in baseline_emails if e}
+    master_email = _normalized_email(get_admin_email())
+    deadline = time.time() + max_wait
+    last_count = None
+    # 401 累计计数:管理员 session_token 实际无 admin 权限时,401 会一直不变,
+    # 与其傻等 180s 再超时,不如连续 3 次 401 就判定 session 失效,早停并给出可诊断信息
+    unauthorized_hits = 0
+    forbidden_hits = 0
+    while time.time() < deadline:
+        # 即使在等待清空,也允许用户点"停止任务"让流程尽早退出,不要硬等 180s
+        if cancel_signal.is_cancelled():
+            logger.warning("[免费号] 等待新成员清空期间收到取消请求,提前退出")
+            return False
+        account_id = get_chatgpt_account_id()
+        if not account_id:
+            logger.error("[免费号] account_id 为空，无法确认席位")
+            return False
+        path = f"/backend-api/accounts/{account_id}/users"
+        result = chatgpt_api._api_fetch("GET", path)
+        status = result["status"]
+        if status != 200:
+            body_excerpt = (result.get("body") or "")[:220].replace("\n", " ")
+            logger.warning(
+                "[免费号] 成员列表拉取失败: %d，body=%s，继续等待",
+                status,
+                body_excerpt,
+            )
+            # OpenAI 对 Team admin 接口:401=session 未认证,403=认证了但非 admin
+            # 两种都不是"再等等就好"的状态,快速 fail-fast 比傻等 180s 更有信息量
+            if status == 401:
+                unauthorized_hits += 1
+                if unauthorized_hits >= 3:
+                    logger.error(
+                        "[免费号] 连续 %d 次 401 鉴权失败，session_token 已失效或权限不足，"
+                        "请在「设置」页重新导入管理员 session_token",
+                        unauthorized_hits,
+                    )
+                    return False
+            elif status == 403:
+                forbidden_hits += 1
+                if forbidden_hits >= 3:
+                    logger.error(
+                        "[免费号] 连续 %d 次 403，当前账号非 workspace admin，"
+                        "生成免费号需要管理员在 Team 工作区里踢人的能力",
+                        forbidden_hits,
+                    )
+                    return False
+            time.sleep(poll_interval)
+            continue
+
+        try:
+            data = json.loads(result["body"])
+            members = data.get("items", data.get("users", data.get("members", [])))
+        except Exception as exc:
+            logger.warning("[免费号] 成员列表解析失败: %s", exc)
+            time.sleep(poll_interval)
+            continue
+
+        emails_in_team = {_normalized_email(m.get("email", "")) for m in members if m.get("email")}
+        emails_in_team.discard(master_email)
+        emails_in_team.discard("")
+        # 只关心"新增"(不在 baseline 里的),baseline 的成员是用户希望保留的 Team 席位
+        new_members = emails_in_team - baseline_emails
+
+        if not new_members:
+            baseline_still = emails_in_team & baseline_emails
+            logger.info(
+                "[免费号] 新增成员已清空(baseline 保留 %d 个: %s)",
+                len(baseline_still),
+                sorted(baseline_still)[:6] or ["-"],
+            )
+            return True
+
+        if last_count != len(new_members):
+            logger.info(
+                "[免费号] Team 仍有 %d 个未被踢出的新号: %s,等待清空...",
+                len(new_members),
+                sorted(new_members)[:6],
+            )
+            last_count = len(new_members)
+        time.sleep(poll_interval)
+
+    logger.error("[免费号] 等待新增成员清空超时(%ss),新号未被踢干净", max_wait)
+    return False
+
+
+def _cmd_fill_personal(count):
+    """
+    生产 count 个免费号:注册 → 主号踢出 → personal OAuth → 状态置 PERSONAL。
+
+    风控策略(用户明确要求):
+    1. 一个主号同时最多 4 个子号在 Team 里 → 每批限制 this_round = min(4, remaining)
+    2. 不强制清空 Team 现有席位:进入时把非主号成员邮箱快照为 baseline(可能是 Team fill
+       创建的真实 Team 子号,用户希望保留)。每批结束后只等"本批注册的新号"被踢干净,
+       不管 baseline 成员是否还在。
+    3. 每个账号之间随机 sleep 8-20s,每批之间 30-60s,避免节奏单一被识别
+    4. chatgpt_api 在整个 fill 流程里懒加载一次,避免反复 start/stop 产生可疑痕迹
+    """
+    import random
+
+    count = max(0, int(count or 0))
+    if count <= 0:
+        logger.info("[免费号] 数量为 0，跳过")
+        return
+
+    BATCH_SIZE = 4
+    WAIT_TEAM_EMPTY_TIMEOUT = 180
+
+    mail_client = CloudMailClient()
+    mail_client.login()
+
+    # 懒加载 chatgpt_api：只在需要查席位时启动
+    chatgpt = [None]
+
+    def _ensure_chatgpt():
+        if not chatgpt[0] or not chatgpt[0].browser:
+            chatgpt[0] = ChatGPTTeamAPI()
+            chatgpt[0].start()
+        return chatgpt[0]
+
+    def _stop_chatgpt():
+        if chatgpt[0] and chatgpt[0].browser:
+            try:
+                chatgpt[0].stop()
+            except Exception as exc:
+                logger.debug("[免费号] 关闭 chatgpt_api 异常: %s", exc)
+        chatgpt[0] = None
+
+    logger.info("[免费号] 目标 %d 个免费号，每批 %d 个", count, BATCH_SIZE)
+
+    # 启动时快照:记录进入时已经在 Team 里的非主号成员,他们不归本任务管
+    # (可能是 Team fill 创建的真实 Team 子号,用户希望保留)
+    try:
+        api_snap = _ensure_chatgpt()
+        ok, baseline_emails = _fetch_team_non_master_emails(api_snap)
+        if not ok:
+            logger.error(
+                "[免费号] 启动时无法拉取 Team 成员列表,鉴权失败或 session_token 无效。"
+                "请先用 /api/admin/fix-account-id 或重新导入 session_token。"
+            )
+            _stop_chatgpt()
+            return
+        logger.info(
+            "[免费号] baseline 非主号成员 %d 个: %s (这些席位不会被清空)",
+            len(baseline_emails),
+            sorted(baseline_emails)[:6] or ["-"],
+        )
+    finally:
+        _stop_chatgpt()
+
+    produced = 0
+    remaining = count
+    batch_idx = 0
+    # 整轮生产的所有 outcome（每个子号一个 dict），批次末 + 结束时做分类统计
+    outcomes = []
+
+    from autoteam import cancel_signal
+
+    try:
+        while remaining > 0:
+            if cancel_signal.is_cancelled():
+                logger.warning("[免费号] 收到取消请求,停止后续批次")
+                break
+            batch_idx += 1
+            # Team 席位总上限 4 人:baseline 已占了一部分,本批最多再加 (4 - baseline) 个,
+            # 避免瞬间超过 4 个子号触发 OpenAI 风控。若 baseline 已占满 4,最少放 1 个让流程能推进
+            # (用户允许 baseline 存在,但至少要允许本任务有产出空间)。
+            max_new_this_batch = max(1, 4 - len(baseline_emails))
+            this_round = min(BATCH_SIZE, remaining, max_new_this_batch)
+            logger.info(
+                "[免费号] === 第 %d 批开始(本批 %d 个,剩余 %d,baseline %d 个) ===",
+                batch_idx,
+                this_round,
+                remaining,
+                len(baseline_emails),
+            )
+
+            # 第一批进入时 Team 就是 baseline 状态,不需要等;从第二批开始等"上一批新号"被踢干净
+            if batch_idx > 1:
+                try:
+                    api = _ensure_chatgpt()
+                    ok = _wait_team_new_members_cleared(
+                        api, baseline_emails, max_wait=WAIT_TEAM_EMPTY_TIMEOUT
+                    )
+                    if not ok:
+                        logger.error(
+                            "[免费号] 第 %d 批开始前上一批新号未踢干净,停止生产避免触发风控",
+                            batch_idx,
+                        )
+                        break
+                finally:
+                    # 释放浏览器，让每个子号注册时拿到干净的 playwright 环境
+                    _stop_chatgpt()
+
+            batch_produced = 0
+            batch_outcomes = []
+            for i in range(this_round):
+                if cancel_signal.is_cancelled():
+                    logger.warning("[免费号] 收到取消请求,跳出本批剩余账号")
+                    break
+                seq = produced + batch_produced + 1
+                logger.info("[免费号] 第 %d 批 第 %d/%d 个（累计 %d/%d）", batch_idx, i + 1, this_round, seq, count)
+                # 单个账号内部的任何异常都不能终止整批（否则外层 finally 后的 sync_to_cpa 会丢失已产出的账号）
+                outcome = {}
+                try:
+                    email = create_new_account(None, mail_client, leave_workspace=True, out_outcome=outcome)
+                except Exception as exc:
+                    logger.error(
+                        "[免费号] 第 %d 批 第 %d 个 create_new_account 异常，跳过: %s",
+                        batch_idx,
+                        i + 1,
+                        exc,
+                    )
+                    email = None
+                    outcome = {"status": "exception", "reason": f"未捕获异常: {exc}"}
+                    record_failure("", "exception", f"_cmd_fill_personal 里 create_new_account 抛异常: {exc}")
+
+                if not outcome.get("status"):
+                    # 例如从 _check_pending_invites 路径成功回来，outcome 没被 create_account_direct 填
+                    outcome["status"] = "success" if email else "unknown_failure"
+
+                batch_outcomes.append(outcome)
+                outcomes.append(outcome)
+
+                if email:
+                    batch_produced += 1
+                    logger.info(
+                        "[免费号] 第 %d 批 第 %d 个完成: %s (status=%s)",
+                        batch_idx,
+                        i + 1,
+                        email,
+                        outcome.get("status"),
+                    )
+                else:
+                    logger.warning(
+                        "[免费号] 第 %d 批 第 %d 个生产失败：status=%s, reason=%s, last_email=%s",
+                        batch_idx,
+                        i + 1,
+                        outcome.get("status"),
+                        outcome.get("reason"),
+                        outcome.get("last_email") or outcome.get("email"),
+                    )
+
+                # 账号间随机抖动
+                if i < this_round - 1:
+                    gap = random.uniform(8, 20)
+                    logger.info("[免费号] 账号间间隔 %.1fs", gap)
+                    time.sleep(gap)
+
+            produced += batch_produced
+            remaining = count - produced
+            batch_stats = _summarize_outcomes(batch_outcomes)
+            logger.info(
+                "[免费号] === 第 %d 批完成：本批成功 %d / %d，累计 %d/%d，剩余 %d ===",
+                batch_idx,
+                batch_produced,
+                this_round,
+                produced,
+                count,
+                remaining,
+            )
+            logger.info("[免费号] 第 %d 批分类统计: %s", batch_idx, batch_stats)
+
+            # 批次结束后:等本批注册的新号都被踢出(回到 baseline),否则停下
+            if remaining > 0:
+                try:
+                    api = _ensure_chatgpt()
+                    ok = _wait_team_new_members_cleared(
+                        api, baseline_emails, max_wait=WAIT_TEAM_EMPTY_TIMEOUT
+                    )
+                    if not ok:
+                        logger.error("[免费号] 第 %d 批结束后新号未踢干净,停止继续生产", batch_idx)
+                        break
+                finally:
+                    _stop_chatgpt()
+
+                cool_down = random.uniform(30, 60)
+                logger.info("[免费号] 批次间冷却 %.1fs", cool_down)
+                time.sleep(cool_down)
+    finally:
+        _stop_chatgpt()
+        # 无论主循环以何种方式退出（完成 / 被阻断 / 异常），都汇总一次 + 把已生产的账号同步进 CPA
+        total_stats = _summarize_outcomes(outcomes)
+        logger.info(
+            "[免费号汇总] 目标 %d，尝试 %d，成功 %d，失败 %d（共 %d 批）",
+            count,
+            len(outcomes),
+            produced,
+            len(outcomes) - produced,
+            batch_idx,
+        )
+        logger.info("[免费号汇总] 各类分布: %s", total_stats)
+        # 把每个失败账号的 last_email + status + reason 再打一条，方便直接定位
+        for o in outcomes:
+            if o.get("status") != "success":
+                logger.info(
+                    "[免费号汇总] FAIL email=%s status=%s reason=%s",
+                    o.get("last_email") or o.get("email") or "",
+                    o.get("status"),
+                    o.get("reason"),
+                )
+        try:
+            sync_to_cpa()
+        except Exception as exc:
+            logger.error("[免费号] sync_to_cpa 异常（已生产账号本地已入池，可稍后手动同步）: %s", exc)
+        try:
+            cmd_status()
+        except Exception as exc:
+            logger.error("[免费号] cmd_status 异常: %s", exc)
 
 
 def cmd_cleanup(max_seats=None):

@@ -86,12 +86,19 @@ def check_and_setup(interactive: bool = True) -> bool:
 
     if not missing:
         # 配置齐全，每次启动验证连通性
+        _skip = os.environ.get("AUTOTEAM_SKIP_VERIFY", "").strip().lower() in ("1", "true", "yes")
         if not _verify_cloudmail():
-            logger.error("[验证] CloudMail 配置有误，请修改 .env 后重新启动")
-            sys.exit(1)
+            if _skip:
+                logger.warning("[验证] CloudMail 验证失败，已根据 AUTOTEAM_SKIP_VERIFY 继续启动")
+            else:
+                logger.error("[验证] CloudMail 配置有误，请修改 .env 后重新启动（或设置 AUTOTEAM_SKIP_VERIFY=1 跳过）")
+                sys.exit(1)
         if not _verify_cpa():
-            logger.error("[验证] CPA 配置有误，请修改 .env 后重新启动")
-            sys.exit(1)
+            if _skip:
+                logger.warning("[验证] CPA 验证失败，已根据 AUTOTEAM_SKIP_VERIFY 继续启动")
+            else:
+                logger.error("[验证] CPA 配置有误，请修改 .env 后重新启动（或设置 AUTOTEAM_SKIP_VERIFY=1 跳过）")
+                sys.exit(1)
         return True
 
     if not interactive:

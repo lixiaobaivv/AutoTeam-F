@@ -51,6 +51,7 @@ export const api = {
   getActiveAccounts: () => request('GET', '/accounts/active'),
   getStandbyAccounts: () => request('GET', '/accounts/standby'),
   deleteAccount: (email) => request('DELETE', `/accounts/${encodeURIComponent(email)}`),
+  deleteAccountsBatch: (emails, continueOnError = true) => request('POST', '/accounts/delete-batch', { emails, continue_on_error: continueOnError }),
   loginAccount: (email) => request('POST', '/accounts/login', { email }),
   getCodexAuth: (email) => request('GET', `/accounts/${encodeURIComponent(email)}/codex-auth`),
   kickAccount: (email) => request('POST', `/accounts/${encodeURIComponent(email)}/kick`),
@@ -79,14 +80,21 @@ export const api = {
   startRotate: (target = 5) => request('POST', '/tasks/rotate', { target }),
   startCheck: () => request('POST', '/tasks/check'),
   startAdd: () => request('POST', '/tasks/add'),
-  startFill: (target = 5) => request('POST', '/tasks/fill', { target }),
+  startFill: (target = 5) => request('POST', '/tasks/fill', { target, leave_workspace: false }),
+  startFillPersonal: (count = 1) => request('POST', '/tasks/fill', { target: count, leave_workspace: true }),
   startCleanup: (maxSeats = null) => request('POST', '/tasks/cleanup', { max_seats: maxSeats }),
 
   getTasks: () => request('GET', '/tasks'),
   getTask: (id) => request('GET', `/tasks/${id}`),
+  cancelTask: () => request('POST', '/tasks/cancel'),
 
   getAutoCheckConfig: () => request('GET', '/config/auto-check'),
   setAutoCheckConfig: (cfg) => request('PUT', '/config/auto-check', cfg),
+
+  getRegisterDomain: () => request('GET', '/config/register-domain'),
+  setRegisterDomain: (domain, verify = true) => request('PUT', '/config/register-domain', { domain, verify }),
+
+  getRegisterFailures: (limit = 50) => request('GET', `/register-failures?limit=${limit}`),
 
   getTeamMembers: () => request('GET', '/team/members'),
   removeTeamMember: (payload) => request('POST', '/team/members/remove', payload),

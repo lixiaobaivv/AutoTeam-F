@@ -15,6 +15,7 @@ STATUS_ACTIVE = "active"  # 在 team 中，额度可用
 STATUS_EXHAUSTED = "exhausted"  # 在 team 中，额度用完
 STATUS_STANDBY = "standby"  # 已移出 team，等待额度恢复
 STATUS_PENDING = "pending"  # 已邀请，等待注册完成
+STATUS_PERSONAL = "personal"  # 已主动退出 team，走个人号 Codex OAuth，不再参与 Team 轮转
 
 
 def _normalized_email(value):
@@ -79,9 +80,24 @@ def update_account(email, **kwargs):
     return acc
 
 
+def delete_account(email):
+    """从账号池彻底移除（不动认证文件、不动 CloudMail 邮箱）。返回是否真的删除了记录。"""
+    accounts = load_accounts()
+    remaining = [a for a in accounts if a.get("email") != email]
+    if len(remaining) == len(accounts):
+        return False
+    save_accounts(remaining)
+    return True
+
+
 def get_active_accounts():
     """获取所有活跃账号"""
     return [a for a in load_accounts() if a["status"] == STATUS_ACTIVE and not _is_main_account_email(a.get("email"))]
+
+
+def get_personal_accounts():
+    """获取所有已退出 Team、走个人 Codex 授权的账号（不参与席位轮转）"""
+    return [a for a in load_accounts() if a["status"] == STATUS_PERSONAL and not _is_main_account_email(a.get("email"))]
 
 
 def get_standby_accounts():

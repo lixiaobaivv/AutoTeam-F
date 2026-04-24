@@ -247,17 +247,20 @@ def _wait_for_otp_submit_result(page, timeout=12):
     return "pending", None
 
 
-def login_codex_via_browser(email, password, mail_client=None):
+def login_codex_via_browser(email, password, mail_client=None, *, use_personal=False):
     """
     通过 Playwright 自动完成 Codex OAuth 登录。
     mail_client: CloudMailClient 实例，用于自动读取登录验证码。
+    use_personal: 若为 True，则走"个人账号"流程 —— 不注入 Team _account cookie，
+                  workspace 选择时跳过 Team 直接用 Personal。用于已退出 Team 的子账号生成 free plan 的 rt/at。
     返回 auth bundle: {access_token, refresh_token, id_token, account_id, email, plan_type}
     """
     code_verifier, code_challenge = _generate_pkce()
     state = secrets.token_urlsafe(16)
     _used_email_ids: set[int] = set()  # 记录已尝试过的邮件，避免重复提交同一封验证码邮件
 
-    chatgpt_account_id = get_chatgpt_account_id()
+    # personal 模式下不引导到 Team workspace
+    chatgpt_account_id = "" if use_personal else get_chatgpt_account_id()
 
     auth_url = _build_auth_url(code_challenge, state)
 
@@ -273,31 +276,13 @@ def login_codex_via_browser(email, password, mail_client=None):
         )
 
         # === Step 0: 先登录 ChatGPT 并切换到 Team workspace ===
-        # 登录前就注入 _account cookie，引导登录流程进入 Team workspace
-        if chatgpt_account_id:
-            context.add_cookies(
-                [
-                    {
-                        "name": "_account",
-                        "value": chatgpt_account_id,
-                        "domain": "chatgpt.com",
-                        "path": "/",
-                        "secure": True,
-                        "sameSite": "Lax",
-                    },
-                    {
-                        "name": "_account",
-                        "value": chatgpt_account_id,
-                        "domain": "auth.openai.com",
-                        "path": "/",
-                        "secure": True,
-                        "sameSite": "Lax",
-                    },
-                ]
-            )
-            logger.debug("[Codex] 登录前已注入 _account cookie = %s", chatgpt_account_id)
+        # 仅 Team 模式需要:登录前注入 _account cookie 引导登录进入 Team workspace。
+        # personal 模式 chatgpt_account_id="" 无 cookie 可注入,step-0 反而会留下半成品
+        # session(新账号 ChatGPT 登录 12s 内通常走不完) → auth_url 在同 context 下会看到
+        # "欢迎回来"页,邮箱灰禁、consent 循环误点 Continue → OpenAI 返回 Operation timed out。
+        # 所以 personal 模式直接跳过 step-0,auth_url 在干净 context 里自己走邮箱/密码/OTP。
 
-        # 在登录开始前记录当前最新邮件 ID，后续只接受比这个更新的
+        # 在登录开始前记录当前最新邮件 ID,后续只接受比这个更新的
         _email_id_before_login = 0
         if mail_client:
             try:
@@ -307,122 +292,148 @@ def login_codex_via_browser(email, password, mail_client=None):
             except Exception:
                 pass
 
-        logger.info("[Codex] 先登录 ChatGPT 选择 Team workspace...")
-        _page = context.new_page()
-        _page.goto("https://chatgpt.com/auth/login", wait_until="domcontentloaded", timeout=60000)
-        time.sleep(5)
+        if use_personal:
+            logger.info("[Codex] personal 模式: 跳过 step-0 ChatGPT 预登录,直接走 auth_url")
+        else:
+            if chatgpt_account_id:
+                context.add_cookies(
+                    [
+                        {
+                            "name": "_account",
+                            "value": chatgpt_account_id,
+                            "domain": "chatgpt.com",
+                            "path": "/",
+                            "secure": True,
+                            "sameSite": "Lax",
+                        },
+                        {
+                            "name": "_account",
+                            "value": chatgpt_account_id,
+                            "domain": "auth.openai.com",
+                            "path": "/",
+                            "secure": True,
+                            "sameSite": "Lax",
+                        },
+                    ]
+                )
+                logger.debug("[Codex] 登录前已注入 _account cookie = %s", chatgpt_account_id)
 
-        # Cloudflare
-        for _i in range(12):
-            if "verify you are human" not in _page.content()[:2000].lower():
-                break
+            logger.info("[Codex] 先登录 ChatGPT 选择 Team workspace...")
+            _page = context.new_page()
+            _page.goto("https://chatgpt.com/auth/login", wait_until="domcontentloaded", timeout=60000)
             time.sleep(5)
 
-        # 点击登录
-        try:
-            _page.locator('button:has-text("登录"), button:has-text("Log in")').first.click()
-            time.sleep(3)
-        except Exception:
-            pass
+            # Cloudflare
+            for _i in range(12):
+                if "verify you are human" not in _page.content()[:2000].lower():
+                    break
+                time.sleep(5)
 
-        # 输入邮箱（避免误点 Google/Microsoft 第三方登录按钮）
-        try:
-            ei = _page.locator('input[name="email"], input[id="email-input"], input[id="email"]').first
-            if ei.is_visible(timeout=5000):
-                ei.fill(email)
-                time.sleep(0.5)
-                _click_primary_auth_button(_page, ei, ["Continue", "继续"])
-                time.sleep(3)
-        except Exception:
-            pass
-
-        # 输入密码 / 点击一次性验证码登录
-        try:
-            pi = _page.locator('input[type="password"]').first
-            if pi.is_visible(timeout=5000):
-                if password:
-                    pi.fill(password)
-                    time.sleep(0.5)
-                    _click_primary_auth_button(_page, pi, ["Continue", "继续", "Log in"])
-                else:
-                    # 没有密码，点击"使用一次性验证码登录"
-                    otp_btn = _page.locator(
-                        'button:has-text("一次性验证码"), button:has-text("one-time"), button:has-text("email login")'
-                    ).first
-                    if otp_btn.is_visible(timeout=3000):
-                        logger.info("[Codex] 无密码，点击一次性验证码登录")
-                        otp_btn.click()
-                    else:
-                        # fallback: 提交空密码让页面报错，然后找验证码按钮
-                        _click_primary_auth_button(_page, pi, ["Continue", "继续", "Log in"])
-                time.sleep(8)
-        except Exception:
-            pass
-
-        # 可能需要邮箱验证码
-        try:
-            ci = _page.locator('input[name="code"]').first
-            if ci.is_visible(timeout=5000) and mail_client:
-                logger.info("[Codex] ChatGPT 登录需要验证码，等待 emailId > %d 的新邮件...", _email_id_before_login)
-                otp = None
-                otp_email_id = 0
-                t0 = time.time()
-                while time.time() - t0 < 120:
-                    for em in mail_client.search_emails_by_recipient(email, size=5):
-                        email_id = em.get("emailId", 0)
-                        if email_id <= _email_id_before_login or email_id in _used_email_ids:
-                            continue
-                        otp = mail_client.extract_verification_code(em)
-                        if otp:
-                            otp_email_id = email_id
-                            break
-                    if otp:
-                        break
-                    time.sleep(3)
-                if otp:
-                    _used_email_ids.add(otp_email_id)
-                    ci.fill(otp)
-                    time.sleep(0.5)
-                    _page.locator('button[type="submit"]').first.click()
-                    time.sleep(5)
-        except Exception:
-            pass
-
-        _screenshot(_page, "codex_00_chatgpt_login.png")
-        logger.info("[Codex] ChatGPT 登录后 URL: %s", _page.url)
-
-        # 如果是 workspace 选择页面，选择 Team
-        if "workspace" in _page.url:
-            workspace_name = get_chatgpt_workspace_name()
-            logger.info("[Codex] 检测到 workspace 选择页面...")
+            # 点击登录
             try:
-                ws_btn = _page.locator(f'text="{workspace_name}"').first
-                if workspace_name and ws_btn.is_visible(timeout=3000):
-                    logger.info("[Codex] 选择 workspace: %s", workspace_name)
-                    ws_btn.click()
-                    time.sleep(5)
-                else:
-                    # fallback: 选第二个选项（第一个通常是"个人"）
-                    options = _page.locator('a, button, [role="button"]').all()
-                    for opt in options:
-                        try:
-                            text = opt.inner_text(timeout=1000).strip()
-                            if text and "个人" not in text and "Personal" not in text and text not in ("ChatGPT", ""):
-                                logger.info("[Codex] 选择 workspace: %s", text)
-                                opt.click()
-                                time.sleep(5)
-                                break
-                        except Exception:
-                            continue
+                _page.locator('button:has-text("登录"), button:has-text("Log in")').first.click()
+                time.sleep(3)
             except Exception:
                 pass
-            _screenshot(_page, "codex_00_after_workspace.png")
-            logger.info("[Codex] 选择 workspace 后 URL: %s", _page.url)
 
-        # _account cookie 已在登录前注入
+            # 输入邮箱（避免误点 Google/Microsoft 第三方登录按钮）
+            try:
+                ei = _page.locator('input[name="email"], input[id="email-input"], input[id="email"]').first
+                if ei.is_visible(timeout=5000):
+                    ei.fill(email)
+                    time.sleep(0.5)
+                    _click_primary_auth_button(_page, ei, ["Continue", "继续"])
+                    time.sleep(3)
+            except Exception:
+                pass
 
-        # 关闭 ChatGPT 页面但保留 context
-        _page.close()
+            # 输入密码 / 点击一次性验证码登录
+            try:
+                pi = _page.locator('input[type="password"]').first
+                if pi.is_visible(timeout=5000):
+                    if password:
+                        pi.fill(password)
+                        time.sleep(0.5)
+                        _click_primary_auth_button(_page, pi, ["Continue", "继续", "Log in"])
+                    else:
+                        # 没有密码，点击"使用一次性验证码登录"
+                        otp_btn = _page.locator(
+                            'button:has-text("一次性验证码"), button:has-text("one-time"), button:has-text("email login")'
+                        ).first
+                        if otp_btn.is_visible(timeout=3000):
+                            logger.info("[Codex] 无密码，点击一次性验证码登录")
+                            otp_btn.click()
+                        else:
+                            # fallback: 提交空密码让页面报错，然后找验证码按钮
+                            _click_primary_auth_button(_page, pi, ["Continue", "继续", "Log in"])
+                    time.sleep(8)
+            except Exception:
+                pass
+
+            # 可能需要邮箱验证码
+            try:
+                ci = _page.locator('input[name="code"]').first
+                if ci.is_visible(timeout=5000) and mail_client:
+                    logger.info("[Codex] ChatGPT 登录需要验证码，等待 emailId > %d 的新邮件...", _email_id_before_login)
+                    otp = None
+                    otp_email_id = 0
+                    t0 = time.time()
+                    while time.time() - t0 < 120:
+                        for em in mail_client.search_emails_by_recipient(email, size=5):
+                            email_id = em.get("emailId", 0)
+                            if email_id <= _email_id_before_login or email_id in _used_email_ids:
+                                continue
+                            otp = mail_client.extract_verification_code(em)
+                            if otp:
+                                otp_email_id = email_id
+                                break
+                        if otp:
+                            break
+                        time.sleep(3)
+                    if otp:
+                        _used_email_ids.add(otp_email_id)
+                        ci.fill(otp)
+                        time.sleep(0.5)
+                        _page.locator('button[type="submit"]').first.click()
+                        time.sleep(5)
+            except Exception:
+                pass
+
+            _screenshot(_page, "codex_00_chatgpt_login.png")
+            logger.info("[Codex] ChatGPT 登录后 URL: %s", _page.url)
+
+            # 如果是 workspace 选择页面，Team 模式选配置的 workspace
+            if "workspace" in _page.url:
+                workspace_name = get_chatgpt_workspace_name()
+                logger.info("[Codex] 检测到 workspace 选择页面...")
+                try:
+                    ws_btn = _page.locator(f'text="{workspace_name}"').first
+                    if workspace_name and ws_btn.is_visible(timeout=3000):
+                        logger.info("[Codex] 选择 workspace: %s", workspace_name)
+                        ws_btn.click()
+                        time.sleep(5)
+                    else:
+                        # fallback: 选第二个选项（第一个通常是"个人"）
+                        options = _page.locator('a, button, [role="button"]').all()
+                        for opt in options:
+                            try:
+                                text = opt.inner_text(timeout=1000).strip()
+                                if text and "个人" not in text and "Personal" not in text and text not in ("ChatGPT", ""):
+                                    logger.info("[Codex] 选择 workspace: %s", text)
+                                    opt.click()
+                                    time.sleep(5)
+                                    break
+                            except Exception:
+                                continue
+                except Exception:
+                    pass
+                _screenshot(_page, "codex_00_after_workspace.png")
+                logger.info("[Codex] 选择 workspace 后 URL: %s", _page.url)
+
+            # _account cookie 已在登录前注入
+
+            # 关闭 ChatGPT 页面但保留 context
+            _page.close()
 
         # 通过监听请求来捕获 OAuth callback redirect
         def on_request(request):
@@ -599,12 +610,39 @@ def login_codex_via_browser(email, password, mail_client=None):
 
             _screenshot(page, f"codex_04_step{step + 1}_before.png")
 
-            # 在任何页面中，如果有 workspace/组织选择，先选 Team
+            # 在任何页面中，如果有 workspace/组织选择，先选 Team（personal 模式下选个人）
             try:
                 page_text = page.inner_text("body")[:1000]
 
+                # personal 模式：检测到工作空间选择页时，直接选 Personal
+                if use_personal and (
+                    "选择一个工作空间" in page_text or "Select a workspace" in page_text or "选择工作空间" in page_text
+                ):
+                    _screenshot(page, f"codex_04_personal_ws_{step + 1}_before.png")
+                    logger.info("[Codex] 检测到工作空间选择页 (step %d, personal 模式)", step + 1)
+                    personal_selected = False
+                    try:
+                        personal_btn = page.locator('text=/个人|Personal/').first
+                        if personal_btn.is_visible(timeout=2000):
+                            personal_btn.click(force=True)
+                            time.sleep(1)
+                            personal_selected = True
+                            logger.info("[Codex] 已选择 Personal workspace (step %d)", step + 1)
+                    except Exception as e:
+                        logger.warning("[Codex] 选择 Personal 失败: %s", e)
+                    _screenshot(page, f"codex_04_personal_ws_{step + 1}_after.png")
+                    if personal_selected:
+                        try:
+                            cont_btn = page.locator('button:has-text("继续"), button:has-text("Continue")').first
+                            if cont_btn.is_visible(timeout=3000):
+                                cont_btn.click()
+                                time.sleep(3)
+                        except Exception:
+                            pass
+                        continue
+
                 # 选择 Team workspace（用配置的名称精确匹配）
-                workspace_name = get_chatgpt_workspace_name()
+                workspace_name = "" if use_personal else get_chatgpt_workspace_name()
                 # 检测"选择一个工作空间"页面，点击 Team workspace
                 if workspace_name and (
                     "选择一个工作空间" in page_text or "Select a workspace" in page_text or "选择工作空间" in page_text

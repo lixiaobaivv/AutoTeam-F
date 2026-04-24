@@ -196,12 +196,25 @@ class _PlaywrightExecutor:
             self._thread.start()
 
     def run(self, func, *args, **kwargs):
-        """在专用线程中执行函数，阻塞等待结果"""
+        """在专用线程中执行函数，阻塞等待结果(默认 5 分钟)"""
+        return self.run_with_timeout(300, func, *args, **kwargs)
+
+    def run_with_timeout(self, timeout: float, func, *args, **kwargs):
+        """
+        明确指定超时时间(秒)。适用于批量/长耗时操作。
+
+        注意:超时后 worker 线程仍会继续跑完当前 func(Playwright 操作无法安全中断),
+        后续通过 _pw_executor 提交的调用会在队列里等它自然完成。调用方需要自己
+        确保不会越过 _playwright_lock 边界并发触发这种情况。
+        """
         self.ensure_started()
         result_event = threading.Event()
         result_holder: dict = {}
         self._queue.put((func, args, kwargs, result_event, result_holder))
-        result_event.wait(timeout=300)  # 最长等 5 分钟
+        if not result_event.wait(timeout=timeout):
+            raise TimeoutError(
+                f"Playwright executor timed out after {timeout}s while running {getattr(func, '__name__', repr(func))}"
+            )
         if "error" in result_holder:
             raise result_holder["error"]
         return result_holder.get("result")
@@ -260,22 +273,29 @@ def _prune_tasks():
 
 def _run_task(task_id: str, func, *args, **kwargs):
     """在后台线程中执行任务"""
+    from autoteam import cancel_signal
+
     global _current_task_id
     task = _tasks[task_id]
 
     _playwright_lock.acquire()
+    # 顺序很关键: 先 reset() 再暴露 _current_task_id。否则 post_task_cancel 在
+    # 两行之间读到新 task_id 并 request_cancel(),随后被我们的 reset() 清掉,
+    # 用户的取消请求被静默吞掉。
+    cancel_signal.reset()
     _current_task_id = task_id
     task["status"] = "running"
     task["started_at"] = time.time()
 
     try:
         result = func(*args, **kwargs)
-        task["status"] = "completed"
+        # 任务完成但中途确实收到取消 → 标 cancelled
+        task["status"] = "cancelled" if cancel_signal.is_cancelled() else "completed"
         task["result"] = result
     except Exception as e:
-        task["status"] = "failed"
+        task["status"] = "cancelled" if cancel_signal.is_cancelled() else "failed"
         task["error"] = str(e)
-        logger.error("[API] 任务 %s 失败: %s", task_id[:8], e)
+        logger.error("[API] 任务 %s %s: %s", task_id[:8], task["status"], e)
     finally:
         task["finished_at"] = time.time()
         _current_task_id = None
@@ -316,6 +336,7 @@ def _start_task(command: str, func, params: dict, *args, **kwargs) -> dict:
 
 class TaskParams(BaseModel):
     target: int = 5
+    leave_workspace: bool = False  # cmd_fill 专用：True 表示生产免费号（注册后退出 Team 走 personal OAuth）
 
 
 class CleanupParams(BaseModel):
@@ -351,6 +372,16 @@ class TeamMemberRemoveParams(BaseModel):
     email: str
     user_id: str
     type: str
+
+
+class RegisterDomainParams(BaseModel):
+    domain: str
+    verify: bool = True  # 默认写入前试探一次 CloudMail 是否接受该域
+
+
+class DeleteBatchParams(BaseModel):
+    emails: list[str]
+    continue_on_error: bool = True  # 部分失败时继续剩余账号,False 则遇错即停
 
 
 def _normalized_email(value: str | None) -> str:
@@ -539,6 +570,175 @@ def _set_pending_manual_account_flow(flow, result):
 def get_admin_status():
     """获取管理员登录状态。"""
     return _admin_status()
+
+
+@app.post("/api/admin/fix-account-id")
+def post_admin_fix_account_id():
+    """
+    基于当前已保存的 session_token,重新从 /backend-api/accounts 拉取真实 workspace 列表,
+    覆盖写入 admin_state.account_id / workspace_name。适用于: 之前导入的 session 把
+    account_id 误写成了 OAI 缓存的陈旧 UUID,导致所有 admin 接口 401。
+
+    不需要用户手动退出重登 —— 只是重算 account_id。
+    """
+    from autoteam.admin_state import (
+        get_admin_email,
+        get_admin_session_token,
+        get_chatgpt_account_id,
+        update_admin_state,
+    )
+    from autoteam.chatgpt_api import ChatGPTTeamAPI
+
+    if not get_admin_session_token():
+        raise HTTPException(status_code=400, detail="尚未保存 session_token,请先导入")
+
+    def _do():
+        api = ChatGPTTeamAPI()
+        try:
+            api._launch_browser()
+            logger.info("[修复 account_id] 打开 chatgpt.com 注入 session...")
+            api.page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=60000)
+            time.sleep(3)
+            api._wait_for_cloudflare()
+            api._inject_session(get_admin_session_token())
+            # 注入 session 后可能触发一次新的 CF 挑战,再等一次避免首个 _api_fetch 碰上 challenge 页
+            api.page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=60000)
+            time.sleep(2)
+            api._wait_for_cloudflare()
+            api._fetch_access_token()
+
+            team, personal = api._list_real_workspaces()
+            admin_roles = ("account-owner", "admin", "org-admin", "workspace-owner")
+            chosen = None
+            for acc in team:
+                if str(acc.get("current_user_role") or "").lower() in admin_roles:
+                    chosen = acc
+                    break
+            if not chosen and team:
+                chosen = team[0]
+            if not chosen:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"当前 session ({get_admin_email()}) 没有 Team workspace,"
+                        f" 只有: {[a.get('structure') for a in personal]}。"
+                        f"请确认该账号已被邀请加入 Team。"
+                    ),
+                )
+
+            new_account_id = str(chosen.get("id") or "")
+            new_workspace_name = str(chosen.get("name") or "")
+
+            # 用新 account_id 验证接口是否真能访问
+            api.account_id = new_account_id
+            verify = api._api_fetch("GET", f"/backend-api/accounts/{new_account_id}/settings")
+            if verify.get("status") != 200:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"新 account_id={new_account_id} 仍不可访问 "
+                        f"status={verify.get('status')},session_token 可能已过期,请重新导入。"
+                    ),
+                )
+
+            old_account_id = get_chatgpt_account_id()
+            update_admin_state(account_id=new_account_id, workspace_name=new_workspace_name)
+            logger.info(
+                "[修复 account_id] 已更新: %s -> %s (workspace=%s)",
+                old_account_id,
+                new_account_id,
+                new_workspace_name,
+            )
+            return {
+                "message": "已修复",
+                "old_account_id": old_account_id,
+                "new_account_id": new_account_id,
+                "workspace_name": new_workspace_name,
+                "role": chosen.get("current_user_role"),
+            }
+        finally:
+            try:
+                api.stop()
+            except Exception:
+                pass
+
+    if not _playwright_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail=_current_busy_detail("有任务正在执行"))
+    try:
+        return _pw_executor.run(_do)
+    finally:
+        _playwright_lock.release()
+
+
+@app.get("/api/admin/diagnose")
+def get_admin_diagnose():
+    """
+    用当前管理员 session_token 探测 Team admin 接口,辅助诊断 401/403。
+    返回四个关键接口的状态码 + body 前 200 字:
+    - /api/auth/session  → access_token 是否拿到
+    - /backend-api/me    → 当前登录用户是谁
+    - /backend-api/accounts/<id>/settings  → workspace 是否可读
+    - /backend-api/accounts/<id>/users     → admin 权限是否生效(真正的 fill-personal 卡点)
+    """
+    from autoteam.admin_state import get_admin_email, get_chatgpt_account_id
+    from autoteam.chatgpt_api import ChatGPTTeamAPI
+
+    def _do():
+        # 只读诊断:必须走手动 launch+inject,不调 api.start()——start() 里的
+        # _auto_detect_workspace 会写 admin_state,把诊断弄成副作用操作
+        from autoteam.admin_state import get_admin_session_token
+
+        api = ChatGPTTeamAPI()
+        try:
+            api._launch_browser()
+            api.page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=60000)
+            time.sleep(3)
+            api._wait_for_cloudflare()
+            session_token = get_admin_session_token()
+            if session_token:
+                api.account_id = get_chatgpt_account_id() or ""  # 让 _inject_session 把 _account cookie 带上
+                api._inject_session(session_token)
+                api.page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=60000)
+                time.sleep(2)
+                api._wait_for_cloudflare()
+            api._fetch_access_token()
+            account_id = api.account_id or get_chatgpt_account_id() or ""
+            probes = {}
+
+            session_result = api.page.evaluate(
+                "async () => { const r = await fetch('/api/auth/session'); "
+                "return { status: r.status, body: (await r.text()).slice(0, 400) }; }"
+            )
+            probes["auth_session"] = session_result
+
+            for name, path in [
+                ("backend_me", "/backend-api/me"),
+                ("backend_accounts", "/backend-api/accounts"),
+                ("workspace_settings", f"/backend-api/accounts/{account_id}/settings"),
+                ("workspace_users", f"/backend-api/accounts/{account_id}/users"),
+            ]:
+                r = api._api_fetch("GET", path)
+                probes[name] = {"status": r.get("status"), "body": (r.get("body") or "")[:500]}
+
+            return {
+                "admin_email": get_admin_email(),
+                "account_id": account_id,
+                "access_token_present": bool(api.access_token),
+                "access_token_prefix": (api.access_token or "")[:30],
+                "probes": probes,
+            }
+        finally:
+            try:
+                api.stop()
+            except Exception:
+                pass
+
+    if not _playwright_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail=_current_busy_detail("有任务正在执行"))
+    try:
+        return _pw_executor.run(_do)
+    finally:
+        _playwright_lock.release()
 
 
 @app.get("/api/main-codex/status")
@@ -1079,6 +1279,107 @@ def delete_account(email: str):
         _playwright_lock.release()
 
 
+@app.post("/api/accounts/delete-batch")
+def delete_accounts_batch(params: DeleteBatchParams):
+    """
+    批量删除本地管理账号。整批共享一个 chatgpt_api + mail_client,
+    Team 成员/邀请状态只拉一次,CPA 在整批结束后同步一次,避免重复开销。
+    """
+    from autoteam.account_ops import delete_managed_account, fetch_team_state
+    from autoteam.accounts import load_accounts
+    from autoteam.chatgpt_api import ChatGPTTeamAPI
+    from autoteam.cloudmail import CloudMailClient
+    from autoteam.cpa_sync import sync_to_cpa
+
+    raw_emails = [(e or "").strip() for e in (params.emails or [])]
+    emails = [e for e in raw_emails if e]
+    if not emails:
+        raise HTTPException(status_code=400, detail="emails 不能为空")
+
+    # 去重,保留首次出现顺序
+    seen = set()
+    dedup = []
+    for e in emails:
+        low = e.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        dedup.append(e)
+    emails = dedup
+
+    main_emails = [e for e in emails if _is_main_account_email(e)]
+    if main_emails:
+        raise HTTPException(status_code=400, detail=f"主号不允许删除: {main_emails}")
+
+    if not _playwright_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail=_current_busy_detail("有任务正在执行，请等待完成后再批量删除"))
+
+    def _run():
+        accounts = load_accounts()
+        existing = {(a.get("email") or "").lower(): a for a in accounts}
+
+        chatgpt_api = None
+        mail_client = None
+        results = []
+        try:
+            chatgpt_api = ChatGPTTeamAPI()
+            chatgpt_api.start()
+            mail_client = CloudMailClient()
+            mail_client.login()
+            # 整批共享一次 Team 状态快照,避免每个删除都重查一次
+            remote_state = fetch_team_state(chatgpt_api)
+
+            for email in emails:
+                if email.lower() not in existing:
+                    results.append({"email": email, "ok": False, "error": "账号不存在"})
+                    if not params.continue_on_error:
+                        break
+                    continue
+                try:
+                    cleanup = delete_managed_account(
+                        email,
+                        chatgpt_api=chatgpt_api,
+                        mail_client=mail_client,
+                        remote_state=remote_state,
+                        sync_cpa_after=False,  # 整批结束后统一同步
+                    )
+                    results.append({"email": email, "ok": True, "cleanup": cleanup})
+                except Exception as exc:
+                    logger.error("[批量删除] %s 失败: %s", email, exc)
+                    results.append({"email": email, "ok": False, "error": str(exc)})
+                    if not params.continue_on_error:
+                        break
+        finally:
+            if chatgpt_api:
+                try:
+                    chatgpt_api.stop()
+                except Exception as exc:
+                    logger.debug("[批量删除] 关闭 chatgpt_api 异常: %s", exc)
+            try:
+                sync_to_cpa()
+            except Exception as exc:
+                logger.warning("[批量删除] 结尾 sync_to_cpa 失败: %s", exc)
+
+        ok_count = sum(1 for r in results if r["ok"])
+        return {
+            "results": results,
+            "summary": {
+                "total": len(emails),
+                "ok": ok_count,
+                "failed": len(results) - ok_count,
+                "skipped": len(emails) - len(results),
+            },
+        }
+
+    try:
+        # 每个账号平均 30s (拉取 team 状态 + kick + delete cloudmail),再给 120s 兜底余量。
+        # 若仍超时会抛 TimeoutError,worker 线程会在后台继续跑完,但锁会释放 → 用户可以再提。
+        timeout = max(300, 30 * len(emails) + 120)
+        return _pw_executor.run_with_timeout(timeout, _run)
+    finally:
+        _playwright_lock.release()
+
+
 @app.post("/api/accounts/{email}/kick")
 def post_kick_account(email: str):
     """将账号从 Team 中移出，状态变为 standby"""
@@ -1136,7 +1437,7 @@ def post_account_login(params: LoginAccountParams):
         raise HTTPException(status_code=404, detail="账号不存在")
 
     def _run():
-        from autoteam.accounts import STATUS_ACTIVE, update_account
+        from autoteam.accounts import STATUS_ACTIVE, STATUS_PERSONAL, update_account
         from autoteam.cloudmail import CloudMailClient
         from autoteam.codex_auth import (
             check_codex_quota,
@@ -1146,16 +1447,27 @@ def post_account_login(params: LoginAccountParams):
             save_auth_file,
         )
 
+        # 账号状态决定登录模式：PERSONAL 走 use_personal=True 补个人号 OAuth；其他走 Team 模式
+        use_personal = (acc.get("status") == STATUS_PERSONAL)
+
         mail_client = CloudMailClient()
         mail_client.login()
-        bundle = login_codex_via_browser(email, acc.get("password", ""), mail_client=mail_client)
+        bundle = login_codex_via_browser(
+            email,
+            acc.get("password", ""),
+            mail_client=mail_client,
+            use_personal=use_personal,
+        )
         if bundle:
             auth_file = save_auth_file(bundle)
-            update_account(email, auth_file=auth_file)
-            # 登录成功且是 team plan，自动标记为 active
-            if bundle.get("plan_type") == "team":
-                update_account(email, status=STATUS_ACTIVE, last_active_at=time.time())
-                # 查一下额度并保存快照
+            update_account(email, auth_file=auth_file, last_active_at=time.time())
+            plan_type = (bundle.get("plan_type") or "").lower()
+
+            if use_personal:
+                # personal 补登录：不改状态（保持 PERSONAL），只刷新 auth_file
+                update_account(email, status=STATUS_PERSONAL)
+            elif plan_type == "team":
+                update_account(email, status=STATUS_ACTIVE)
                 token = bundle.get("access_token")
                 if token:
                     st, info = check_codex_quota(token)
@@ -1175,7 +1487,7 @@ def post_account_login(params: LoginAccountParams):
             from autoteam.cpa_sync import sync_to_cpa
 
             sync_to_cpa()
-            return {"email": email, "plan": bundle.get("plan_type"), "auth_file": auth_file}
+            return {"email": email, "plan": bundle.get("plan_type"), "auth_file": auth_file, "mode": "personal" if use_personal else "team"}
         raise RuntimeError(f"Codex 登录失败: {email}")
 
     task = _start_task(f"login:{email}", _run, {"email": email})
@@ -1185,14 +1497,21 @@ def post_account_login(params: LoginAccountParams):
 @app.get("/api/status")
 def get_status():
     """获取所有账号状态 + active 账号实时额度"""
-    from autoteam.accounts import STATUS_ACTIVE, STATUS_EXHAUSTED, STATUS_PENDING, STATUS_STANDBY, load_accounts
+    from autoteam.accounts import (
+        STATUS_ACTIVE,
+        STATUS_EXHAUSTED,
+        STATUS_PENDING,
+        STATUS_PERSONAL,
+        STATUS_STANDBY,
+        load_accounts,
+    )
     from autoteam.codex_auth import check_codex_quota, quota_result_quota_info
 
     accounts = load_accounts()
     quota_cache = {}
 
     for acc in accounts:
-        if acc["status"] != STATUS_ACTIVE and not _is_main_account_email(acc.get("email")):
+        if acc["status"] not in (STATUS_ACTIVE, STATUS_PERSONAL) and not _is_main_account_email(acc.get("email")):
             continue
 
         auth_file = _resolve_status_auth_file(acc)
@@ -1220,6 +1539,7 @@ def get_status():
         "standby": sum(1 for a in sanitized_accounts if a["status"] == STATUS_STANDBY),
         "exhausted": sum(1 for a in sanitized_accounts if a["status"] == STATUS_EXHAUSTED),
         "pending": sum(1 for a in sanitized_accounts if a["status"] == STATUS_PENDING),
+        "personal": sum(1 for a in sanitized_accounts if a["status"] == STATUS_PERSONAL),
         "total": len(sanitized_accounts),
     }
 
@@ -1246,6 +1566,76 @@ def post_sync_from_cpa():
 
     result = sync_from_cpa()
     return {"message": "已从 CPA 同步到本地", "result": result}
+
+
+@app.get("/api/register-failures")
+def get_register_failures_api(limit: int = 50):
+    """返回最近的注册/OAuth 失败明细，前端用来展示"为什么账号没生产出来"。"""
+    from autoteam.register_failures import count_by_category, list_failures
+
+    return {
+        "items": list_failures(limit=max(1, min(limit, 500))),
+        "counts": count_by_category(),
+    }
+
+
+@app.get("/api/config/register-domain")
+def get_register_domain_api():
+    """读取当前子号注册使用的 CloudMail 域名。"""
+    from autoteam.config import CLOUDMAIL_DOMAIN
+    from autoteam.runtime_config import get, get_register_domain
+
+    override = (get("register_domain") or "").strip()
+    return {
+        "domain": get_register_domain(),
+        "override": override,
+        "env_default": (CLOUDMAIL_DOMAIN or "").lstrip("@").strip(),
+    }
+
+
+@app.put("/api/config/register-domain")
+def put_register_domain_api(params: RegisterDomainParams):
+    """
+    更新子号注册域名。verify=True（默认）会试探性调用 CloudMail new_address 验证服务端是否接受此域，
+    成功则立即删除探测地址再保存；失败把 CloudMail 原始错误透传给前端。
+    """
+    from autoteam.cloudmail import CloudMailClient
+    from autoteam.runtime_config import set_register_domain
+
+    cleaned = (params.domain or "").strip().lstrip("@").strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="域名不能为空")
+
+    leaked_probe = None
+    if params.verify:
+        probe_prefix = f"probe{int(time.time())}"
+        acct_id = None
+        probe_email = None
+        try:
+            client = CloudMailClient()
+            client.login()
+            acct_id, probe_email = client.create_temp_email(prefix=probe_prefix, domain=cleaned)
+        except Exception as exc:
+            # CloudMail 返回 "Invalid domain" 等错误直接透传
+            raise HTTPException(status_code=400, detail=f"域名验证失败: {exc}") from exc
+        # 探测地址用完立即回收;删除失败也要让前端看到,否则 CloudMail 会积压僵尸地址
+        try:
+            if acct_id is not None:
+                client.delete_account(acct_id)
+        except Exception as exc:
+            logger.warning("[config] 删除域名探测邮箱失败 (%s, id=%s): %s", probe_email, acct_id, exc)
+            leaked_probe = {"email": probe_email, "acct_id": acct_id, "error": str(exc)}
+
+    set_register_domain(cleaned)
+    logger.info("[config] register_domain 已切换为 @%s", cleaned)
+    resp = {"message": f"注册域名已切换为 @{cleaned}", "domain": cleaned}
+    if leaked_probe:
+        resp["warning"] = (
+            f"域名已保存,但探测邮箱 {leaked_probe['email']} 回收失败,请手动在 CloudMail 删除"
+            f" (id={leaked_probe['acct_id']}): {leaked_probe['error']}"
+        )
+        resp["leaked_probe"] = leaked_probe
+    return resp
 
 
 @app.post("/api/sync/accounts")
@@ -1475,10 +1865,17 @@ def post_add():
 
 @app.post("/api/tasks/fill", status_code=202)
 def post_fill(params: TaskParams = TaskParams()):
-    """补满 Team 成员（后台执行）"""
+    """补满 Team 成员（后台执行）。leave_workspace=True 时切换为"生产免费号"模式"""
     from autoteam.manager import cmd_fill
 
-    task = _start_task("fill", cmd_fill, {"target": params.target}, params.target)
+    command = "fill-personal" if params.leave_workspace else "fill"
+    task = _start_task(
+        command,
+        cmd_fill,
+        {"target": params.target, "leave_workspace": params.leave_workspace},
+        params.target,
+        leave_workspace=params.leave_workspace,
+    )
     return task
 
 
@@ -1505,6 +1902,29 @@ def get_task(task_id: str):
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
     return task
+
+
+@app.post("/api/tasks/cancel", status_code=202)
+def post_task_cancel():
+    """
+    请求当前正在运行的任务在下一个安全点退出。
+    协作式:后台 worker 在每个批次/账号边界检查 cancel_signal.is_cancelled(),
+    调用这里后等 10-30s 让当前步骤跑完,任务状态会在 task["status"] 里显示为 "cancelled"。
+    """
+    from autoteam import cancel_signal
+
+    if not _current_task_id:
+        raise HTTPException(status_code=404, detail="当前没有正在运行的任务")
+    task = _tasks.get(_current_task_id) or {}
+    if task.get("status") not in ("running", "pending"):
+        raise HTTPException(status_code=400, detail=f"任务当前状态 {task.get('status')} 无法取消")
+    cancel_signal.request_cancel(f"手动停止 task={_current_task_id[:8]}")
+    task["cancel_requested"] = True
+    return {
+        "message": "已请求中止,等待当前步骤安全退出",
+        "task_id": _current_task_id,
+        "command": task.get("command"),
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -916,6 +916,41 @@ class ChatGPTTeamAPI:
     def submit_admin_code(self, code):
         return self.submit_login_code(code, actor_label="管理员")
 
+    def _list_real_workspaces(self):
+        """
+        拉取 /backend-api/accounts,按 structure 切分为 team_accounts / personal_accounts。
+        这是 session 真正所属 workspace 的唯一可信来源,其他字段(_account cookie / JWT 的
+        chatgpt_account_id claim)都可能陈旧或被污染。
+
+        返回 (team_accounts, personal_accounts),每个 item 至少包含 id / name / structure /
+        current_user_role 字段。
+        """
+        result = self._api_fetch("GET", "/backend-api/accounts")
+        if result.get("status") != 200:
+            raise RuntimeError(
+                f"无法获取 workspace 列表: status={result.get('status')},"
+                f" body={(result.get('body') or '')[:200]}"
+            )
+        try:
+            data = json.loads(result["body"])
+        except Exception as exc:
+            raise RuntimeError(f"/backend-api/accounts 响应解析失败: {exc}")
+
+        items = data.get("items") or data.get("data") or data.get("accounts") or []
+        if not isinstance(items, list):
+            items = []
+        team = []
+        personal = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            structure = str(item.get("structure") or "").lower()
+            if structure == "workspace":
+                team.append(item)
+            else:
+                personal.append(item)
+        return team, personal
+
     def _guess_account_info(self, allow_dom_fallback=True):
         try:
             data = self.page.evaluate(
@@ -1056,30 +1091,57 @@ class ChatGPTTeamAPI:
             raise RuntimeError("session_token 无效或已过期，未能从当前登录态获取 access token")
         logger.info("[ChatGPT] session_token 导入后 access token 来源: %s", token_source)
 
-        account_id, workspace_name = self._guess_account_info(allow_dom_fallback=False)
-        if not account_id:
-            account_id = self._extract_account_id_from_access_token()
-        if not account_id:
-            cookie_account_id = ""
-            try:
-                for cookie in self.context.cookies():
-                    if cookie.get("name") == "_account" and self._UUID_RE.match(cookie.get("value", "")):
-                        cookie_account_id = cookie["value"]
-                        break
-            except Exception:
-                pass
-            account_id = cookie_account_id
+        # 权威来源:/backend-api/accounts 列出当前 session 真实所属的所有 workspace。
+        # 任何其他来源(_account cookie / JWT claim)都可能是上次 logout 前的残留或 OAI 缓存的
+        # 陈旧值,直接写入会导致所有 admin 接口 401 "Must be part of this workspace"。
+        team_accounts, personal_accounts = self._list_real_workspaces()
 
-        if not account_id:
-            raise RuntimeError("无法从 session_token 自动识别 workspace/account ID，请确认该 session 已登录 Team 主号")
+        # 优先选 Team workspace (structure=="workspace",且 current_user_role 有 admin 权限)。
+        # 用户可能自己就是 account-owner / admin,哪一种 role 都接受,只要不是单纯被邀请的 user。
+        admin_roles = ("account-owner", "admin", "org-admin", "workspace-owner")
+        chosen = None
+        chosen_reason = ""
+        for acc in team_accounts:
+            role = str(acc.get("current_user_role") or "").lower()
+            if role in admin_roles:
+                chosen = acc
+                chosen_reason = f"role={role}"
+                break
+        if not chosen and team_accounts:
+            chosen = team_accounts[0]
+            chosen_reason = f"role={chosen.get('current_user_role')} (非标准 admin,但接受)"
+
+        if not chosen:
+            raise RuntimeError(
+                f"当前 session ({email}) 没有可用的 Team workspace:"
+                f" /backend-api/accounts 只返回 {[a.get('structure') for a in personal_accounts]} "
+                f"结构的账号。请确认该 session_token 对应的账号已被邀请进 Team 并接受邀请。"
+            )
+
+        account_id = str(chosen.get("id") or "")
+        workspace_name = str(chosen.get("name") or "")
+        if not account_id or not self._UUID_RE.match(account_id):
+            raise RuntimeError(f"Team workspace 返回的 account id 格式异常: {account_id!r}")
+
+        # 二次确认:用这个 account_id 调 /settings,若仍 401 说明 session 与 workspace 不匹配,
+        # 宁可立刻失败,也不把错误 state 写进磁盘。
+        verify = self._api_fetch("GET", f"/backend-api/accounts/{account_id}/settings")
+        if verify.get("status") != 200:
+            body = (verify.get("body") or "")[:200]
+            raise RuntimeError(
+                f"account_id={account_id} 鉴权验证失败 status={verify.get('status')},"
+                f" body={body}。session_token 可能与 workspace 不匹配。"
+            )
+
+        logger.info(
+            "[ChatGPT] 已确认 Team workspace: name=%s account_id=%s (%s)",
+            workspace_name or "?",
+            account_id,
+            chosen_reason,
+        )
 
         self.account_id = account_id
-        self.workspace_name = workspace_name or ""
-        if not self.workspace_name:
-            try:
-                self.workspace_name = self._auto_detect_workspace() or ""
-            except Exception as exc:
-                logger.warning("[ChatGPT] 自动获取 workspace 名称失败（已忽略）: %s", exc)
+        self.workspace_name = workspace_name
         update_admin_state(
             email=email,
             session_token=session_token,

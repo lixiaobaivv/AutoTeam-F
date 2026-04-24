@@ -517,11 +517,12 @@ def sync_from_cpa():
 
 def sync_to_cpa():
     """
-    同步本地认证文件到 CPA，只同步 active 状态的账号。
-    - active 且 CPA 没有 → 上传
-    - CPA 有但不是 active（或本地已删除）→ 从 CPA 删除
+    同步本地认证文件到 CPA。同步范围：STATUS_ACTIVE（Team 席位）+ STATUS_PERSONAL（免费号）。
+    - active / personal 有 auth_file → 上传（覆盖）
+    - CPA 有但本地账号状态已不在上述两种（standby / exhausted / pending 等）→ 从 CPA 删除
+    - 仅清理本地 accounts.json 管理过的邮箱，主号和 CPA 手动上传文件不会被删
     """
-    from autoteam.accounts import STATUS_ACTIVE, load_accounts, save_accounts
+    from autoteam.accounts import STATUS_ACTIVE, STATUS_PERSONAL, load_accounts, save_accounts
 
     accounts = load_accounts()
     local_emails = {a["email"].lower() for a in accounts}
@@ -541,33 +542,53 @@ def sync_to_cpa():
     if changed:
         save_accounts(accounts)
 
-    # active 账号的认证文件
-    active_files = {}
+    # 需要同步到 CPA 的账号：active（Team 席位）和 personal（免费号）都要覆盖
+    # 两种状态在 CPA 端共存但相互隔离：文件名不同、email 域可能不同，Team/Personal 互不干扰
+    files_to_sync = {}
+    synced_active = 0
+    synced_personal = 0
     for acc in accounts:
-        if acc["status"] == STATUS_ACTIVE and acc.get("auth_file"):
-            path = Path(acc["auth_file"])
-            if path.exists():
-                active_files[path.name] = path
+        status = acc.get("status")
+        if status not in (STATUS_ACTIVE, STATUS_PERSONAL):
+            continue
+        auth_path = acc.get("auth_file")
+        if not auth_path:
+            continue
+        path = Path(auth_path)
+        if not path.exists():
+            continue
+        files_to_sync[path.name] = path
+        if status == STATUS_ACTIVE:
+            synced_active += 1
+        else:
+            synced_personal += 1
 
     # CPA 认证文件
     cpa_files = list_cpa_files()
     cpa_names = {f["name"]: f for f in cpa_files}
 
-    logger.info("[CPA] active 认证文件: %d, CPA 认证文件: %d", len(active_files), len(cpa_files))
+    logger.info(
+        "[CPA] 待同步认证文件: %d (Team=%d, Personal=%d), CPA 现有: %d",
+        len(files_to_sync),
+        synced_active,
+        synced_personal,
+        len(cpa_files),
+    )
 
-    # 上传：所有 active 认证文件（覆盖同名文件，确保 token 最新）
+    # 上传：所有 active + personal 认证文件（覆盖同名文件，确保 token 最新）
     uploaded = 0
-    for name, path in active_files.items():
+    for name, path in files_to_sync.items():
         logger.info("[CPA] 上传: %s", name)
         if upload_to_cpa(path):
             uploaded += 1
 
-    # 删除：CPA 中有但不在 active 列表的（仅限本地管理的账号）
+    # 删除：CPA 中有但不在同步列表的（仅限本地管理的账号 — 避免误删主号或 CPA 手动文件）
+    # 注意：personal 号已计入 files_to_sync，这里不会被删掉；只有状态变成 STANDBY/EXHAUSTED 等才会清理
     deleted = 0
     for name, cpa_file in cpa_names.items():
         email = cpa_file.get("email", "").lower()
-        if email in local_emails and name not in active_files:
-            logger.info("[CPA] 删除非 active 文件: %s (%s)", name, email)
+        if email in local_emails and name not in files_to_sync:
+            logger.info("[CPA] 删除非 active/personal 文件: %s (%s)", name, email)
             if delete_from_cpa(name):
                 deleted += 1
 
@@ -576,7 +597,11 @@ def sync_to_cpa():
     # 最终状态
     final_cpa = list_cpa_files()
     final_local_managed = [f for f in final_cpa if f.get("email", "").lower() in local_emails]
-    logger.info("[CPA] CPA 中本地管理: %d, 本地 active: %d", len(final_local_managed), len(active_files))
+    logger.info(
+        "[CPA] CPA 中本地管理: %d, 本地待同步 (Team+Personal): %d",
+        len(final_local_managed),
+        len(files_to_sync),
+    )
 
 
 def sync_main_codex_to_cpa(filepath):
