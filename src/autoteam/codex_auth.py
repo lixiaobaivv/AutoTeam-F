@@ -909,7 +909,27 @@ def login_codex_via_browser(email, password, mail_client=None, *, use_personal=F
         logger.error("[Codex] OAuth 登录失败: 未获取到 authorization code")
         return None
 
-    return _exchange_auth_code(auth_code, code_verifier, fallback_email=email)
+    bundle = _exchange_auth_code(auth_code, code_verifier, fallback_email=email)
+    if not bundle:
+        return None
+
+    # Personal 模式强校验 plan_type:当子号还挂在 Team workspace(OpenAI 后端 kick 同步延迟 /
+    # default workspace 为 Team)时,auth.openai.com 会默认选 Team 颁发 token,拿到 plan_type=team
+    # 的 bundle —— 这个 token 绑在 Team account_id 上,一旦子号离开 Team 就作废(refresh 401),
+    # 本地却标成 PERSONAL,用户看到的是"可用免费号"但 Codex 跑不动。必须在这里拒收。
+    if use_personal:
+        plan = (bundle.get("plan_type") or "").lower()
+        if plan != "free":
+            logger.error(
+                "[Codex] personal 模式拿到 plan_type=%s(期望 free),account_id=%s。"
+                "说明账号仍在 Team workspace,OAuth 默认选了 Team → token 绑 Team 后会随踢出作废。"
+                "拒收本次 bundle,触发上游 oauth_failed 分类。",
+                plan or "unknown",
+                bundle.get("account_id"),
+            )
+            return None
+
+    return bundle
 
 
 def login_codex_via_session():

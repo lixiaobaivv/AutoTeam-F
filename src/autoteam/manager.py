@@ -846,6 +846,15 @@ def _run_post_register_oauth(email, password, mail_client, leave_workspace=False
             _record_outcome("kick_failed", reason=f"主号踢出失败 status={remove_status}")
             return None
 
+        # kick 成功后必须等 OpenAI 后端同步:DELETE /users 返回 2xx 不代表 auth.openai.com
+        # 立刻把 default workspace 从 Team 切回 Personal。如果此时立刻开 OAuth,auth 会
+        # 继续把 Team 当 default 颁发 team plan 的 token,拿到的 bundle 会被 plan_type 校
+        # 验拒收(codex_auth.py login_codex_via_browser 末尾)→ 整个账号 oauth_failed,白跑
+        # 2 分钟。等 8s 足够让 workspace default 切换生效,同时也不会让用户觉得慢
+        if remove_status == "removed":
+            logger.info("[注册] kick 成功,等 8s 让 OpenAI workspace default 同步后再 OAuth...")
+            time.sleep(8)
+
         bundle = login_codex_via_browser(email, password, mail_client=mail_client, use_personal=True)
         if bundle:
             auth_file = save_auth_file(bundle)
