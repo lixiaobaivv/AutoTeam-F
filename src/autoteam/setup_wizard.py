@@ -14,24 +14,47 @@ logger = logging.getLogger(__name__)
 ENV_FILE = PROJECT_ROOT / ".env"
 ENV_EXAMPLE = PROJECT_ROOT / ".env.example"
 
+ConfigItem = tuple[str, str, str, bool]
+
 # 需要交互式输入的配置项（key, 提示, 默认值, 是否可选）
-# CLOUDMAIL_EMAIL 已废弃 → 不再列入 REQUIRED_CONFIGS（cf_temp_email 后端只看 PASSWORD,
+# CLOUDMAIL_EMAIL 已废弃 → 不再列入必填配置（cf_temp_email 后端只看 PASSWORD,
 # maillab 后端用 MAILLAB_USERNAME 替代）
-REQUIRED_CONFIGS = [
+MAIL_PROVIDER_CONFIG: ConfigItem = (
+    "MAIL_PROVIDER",
+    "Mail Provider（cf_temp_email = dreamhunter2333 临时邮箱; maillab = maillab/cloud-mail）",
+    "cf_temp_email",
+    True,
+)
+CF_TEMP_EMAIL_CONFIGS: list[ConfigItem] = [
     (
-        "MAIL_PROVIDER",
-        "Mail Provider（cf_temp_email = dreamhunter2333 临时邮箱; maillab = maillab/cloud-mail）",
-        "cf_temp_email",
-        True,
+        "CLOUDMAIL_BASE_URL",
+        "CloudMail API 地址（cf_temp_email 后端）",
+        "",
+        False,
     ),
-    ("CLOUDMAIL_BASE_URL", "CloudMail API 地址（cf_temp_email 后端）", "", False),
     ("CLOUDMAIL_PASSWORD", "CloudMail 管理员密码（cf_temp_email 后端）", "", False),
     ("CLOUDMAIL_DOMAIN", "邮箱域名（如 @example.com）", "", False),
+]
+MAILLAB_CONFIGS: list[ConfigItem] = [
+    ("MAILLAB_API_URL", "maillab API 地址", "", False),
+    ("MAILLAB_USERNAME", "maillab 主账号邮箱", "", False),
+    ("MAILLAB_PASSWORD", "maillab 主账号密码", "", False),
+]
+COMMON_CONFIGS: list[ConfigItem] = [
     ("CPA_URL", "CPA (CLIProxyAPI) 地址", "http://127.0.0.1:8317", False),
     ("CPA_KEY", "CPA 管理密钥", "", False),
     ("PLAYWRIGHT_PROXY_URL", "Playwright 浏览器代理 URL（可选，如 socks5://host:port）", "", True),
     ("PLAYWRIGHT_PROXY_BYPASS", "Playwright 代理绕过列表（可选，如 localhost,127.0.0.1）", "", True),
     ("API_KEY", "API 鉴权密钥（回车自动生成）", "", False),
+]
+
+# 保留默认列表给旧调用方；实际校验应使用 get_required_configs()。
+REQUIRED_CONFIGS = [
+    MAIL_PROVIDER_CONFIG,
+    ("CLOUDMAIL_BASE_URL", "CloudMail API 地址（cf_temp_email 后端）", "", False),
+    ("CLOUDMAIL_PASSWORD", "CloudMail 管理员密码（cf_temp_email 后端）", "", False),
+    ("CLOUDMAIL_DOMAIN", "邮箱域名（如 @example.com）", "", False),
+    *COMMON_CONFIGS,
 ]
 
 
@@ -45,6 +68,39 @@ def _read_env() -> dict[str, str]:
                 key, value = parsed
                 result[key] = value
     return result
+
+
+def _env_value(env: dict[str, str], key: str) -> str:
+    return env.get(key, "") or os.environ.get(key, "")
+
+
+def _selected_mail_provider(env: dict[str, str]) -> str:
+    return (_env_value(env, "MAIL_PROVIDER") or "cf_temp_email").strip().lower()
+
+
+def get_required_configs(env: dict[str, str] | None = None) -> list[ConfigItem]:
+    """按当前 mail provider 返回真实必填配置列表。"""
+    if env is None:
+        env = _read_env()
+    provider = _selected_mail_provider(env)
+
+    if provider in ("cf_temp_email", "cloudflare_temp_email", ""):
+        mail_configs = CF_TEMP_EMAIL_CONFIGS
+    elif provider == "maillab":
+        domain_is_configured = bool(_env_value(env, "MAILLAB_DOMAIN") or _env_value(env, "CLOUDMAIL_DOMAIN"))
+        mail_configs = [
+            *MAILLAB_CONFIGS,
+            (
+                "MAILLAB_DOMAIN",
+                "maillab 邮箱域名（如 @example.com，可回落 CLOUDMAIL_DOMAIN）",
+                "",
+                domain_is_configured,
+            ),
+        ]
+    else:
+        mail_configs = []
+
+    return [MAIL_PROVIDER_CONFIG, *mail_configs, *COMMON_CONFIGS]
 
 
 def _write_env(key: str, value: str):
@@ -86,8 +142,8 @@ def check_and_setup(interactive: bool = True) -> bool:
     env = _read_env()
     missing = []
 
-    for key, prompt, default, optional in REQUIRED_CONFIGS:
-        val = env.get(key, "") or os.environ.get(key, "")
+    for key, prompt, default, optional in get_required_configs(env):
+        val = _env_value(env, key)
         if not val and not optional:
             missing.append((key, prompt, default, optional))
 
