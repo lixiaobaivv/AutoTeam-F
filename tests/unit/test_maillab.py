@@ -141,6 +141,25 @@ def test_create_temp_email_builds_full_email_address(monkeypatch):
     assert captured["body"] == {"email": "alice@example.com"}
 
 
+def test_create_temp_email_prefers_maillab_domain_over_cloudmail_domain(monkeypatch):
+    client = _make_client(monkeypatch)
+    monkeypatch.setenv("MAILLAB_DOMAIN", "@xgp.linuxdoo.com")
+    monkeypatch.setattr("autoteam.config.CLOUDMAIL_DOMAIN", "@wrong.example.com")
+    monkeypatch.setattr("autoteam.runtime_config.get", lambda key, default=None: "")
+    captured: dict = {}
+
+    def fake_post(path, body=None):
+        captured["body"] = body
+        return {"code": 200, "data": {"accountId": 44, "email": body["email"]}}
+
+    monkeypatch.setattr(client, "_post", fake_post)
+
+    aid, email = client.create_temp_email(prefix="alice")
+    assert aid == 44
+    assert email == "alice@xgp.linuxdoo.com"
+    assert captured["body"] == {"email": "alice@xgp.linuxdoo.com"}
+
+
 def test_create_temp_email_falls_back_to_uuid_prefix(monkeypatch):
     client = _make_client(monkeypatch)
 

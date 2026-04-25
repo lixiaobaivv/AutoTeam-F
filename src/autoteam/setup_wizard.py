@@ -275,7 +275,7 @@ def _verify_cloudmail():
     try:
         import uuid as _uuid
 
-        test_account_id, test_email = client.create_temp_email(prefix=f"at-test-{_uuid.uuid4().hex[:6]}")
+        test_account_id, test_email = client.create_temp_email(prefix=f"at-test-{_uuid.uuid4().hex[:6]}", domain=domain)
         logger.info("[验证] %s 创建测试邮箱成功: %s", label, test_email)
     except Exception as e:
         logger.error("[验证] %s 创建邮箱失败: %s", label, e)

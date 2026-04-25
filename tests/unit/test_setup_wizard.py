@@ -1,5 +1,6 @@
 import logging
 
+import autoteam.cloudmail
 from autoteam import setup_wizard
 
 
@@ -128,3 +129,31 @@ def test_check_and_setup_non_interactive_reports_missing_required_fields(tmp_pat
     assert "[配置] 缺少必填项: PLAYWRIGHT_PROXY_BYPASS" not in caplog.text
     assert "[配置] 缺少必填项: API_KEY" in caplog.text
     assert "[配置] 请通过 Web 面板或编辑 .env 文件填入配置" in caplog.text
+
+
+def test_verify_cloudmail_passes_maillab_domain_to_probe_create(monkeypatch):
+    created = {}
+
+    class FakeCloudMailClient:
+        def login(self):
+            return "token"
+
+        def create_temp_email(self, prefix=None, domain=None):
+            created["prefix"] = prefix
+            created["domain"] = domain
+            return 123, "at-test@xgp.linuxdoo.com"
+
+        def delete_account(self, account_id):
+            created["deleted"] = account_id
+
+    monkeypatch.setattr(autoteam.cloudmail, "CloudMailClient", FakeCloudMailClient)
+    monkeypatch.setenv("MAIL_PROVIDER", "maillab")
+    monkeypatch.setenv("MAILLAB_API_URL", "https://mail.example.com/api")
+    monkeypatch.setenv("MAILLAB_USERNAME", "admin@example.com")
+    monkeypatch.setenv("MAILLAB_PASSWORD", "secret")
+    monkeypatch.setenv("MAILLAB_DOMAIN", "@xgp.linuxdoo.com")
+    monkeypatch.setenv("CLOUDMAIL_DOMAIN", "@wrong.example.com")
+
+    assert setup_wizard._verify_cloudmail() is True
+    assert created["domain"] == "@xgp.linuxdoo.com"
+    assert created["deleted"] == 123
