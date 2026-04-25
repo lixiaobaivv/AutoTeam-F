@@ -95,6 +95,22 @@ class CfTempEmailClient(MailProvider):
             body = (r.text or "")[:200]
             raise Exception(f"CloudMail 登录失败: HTTP {r.status_code} {body}")
 
+        # 协议错配嗅探:cf_temp_email 的 /admin/address 应该返回 {results:[...]} 列表;
+        # 如果 base_url 实际上指向 maillab 服务器,catch-all 路由可能也回 200 但响应里
+        # 是 {code, message, data} 这种 maillab 风格,login 假成功后下一步 create 才 401。
+        # 这里提前嗅探,给错配用户一个可读错误,而不是让他们去翻教程踩坑(参考 issue #1)。
+        try:
+            payload = r.json() or {}
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict) and "results" not in payload and ("code" in payload or "data" in payload):
+            raise Exception(
+                "CloudMail 登录响应不像 dreamhunter2333/cloudflare_temp_email"
+                "(没有 `results` 字段,但出现了 `code`/`data`)。"
+                f"你的 CLOUDMAIL_BASE_URL={self.base_url} 看起来是 maillab/cloud-mail 服务器。"
+                "请在 .env 里设置 MAIL_PROVIDER=maillab 并补齐 MAILLAB_API_URL/USERNAME/PASSWORD/DOMAIN。"
+            )
+
         self.token = "admin-" + self.admin_password[:6]
         logger.info("[CloudMail] 管理员鉴权通过")
         return self.token
@@ -131,6 +147,16 @@ class CfTempEmailClient(MailProvider):
             data = r.json()
         except Exception:
             pass
+
+        # 协议错配二次防御:同 login() 的嗅探。如果 login 漏掉(catch-all 路由让 /admin/address
+        # 误回 200),这里 /admin/new_address 拿到 maillab 风格 {code:401,message:"身份认证失效"}
+        # 时给出明确切换提示,避免用户卡在"为什么登录成功但创建失败"。
+        if isinstance(data, dict) and "address" not in data and ("code" in data and "message" in data):
+            raise Exception(
+                f"创建邮箱响应不像 dreamhunter2333/cloudflare_temp_email(收到 maillab 风格 {data})。"
+                "请在 .env 里设置 MAIL_PROVIDER=maillab — cnitlrt/AutoTeam 原版的"
+                "'cloudmail' 实际就是 maillab/cloud-mail。"
+            )
 
         address = data.get("address")
         jwt = data.get("jwt") or ""

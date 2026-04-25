@@ -226,6 +226,56 @@ def check_and_setup(interactive: bool = True) -> bool:
     return True
 
 
+def _sniff_provider_mismatch(provider: str) -> None:
+    """轻量探测 base_url 的路由指纹,与 MAIL_PROVIDER 不匹配时打 warning。
+
+    cf_temp_email:`/admin/address` 不带 admin auth 应回 401(认 x-admin-auth header)
+    maillab:`/login` 应存在(POST 不通也至少不是 404)
+    任一探测失败仅 warning,不阻断启动 — 真正校验在后续 login/create 调用。
+    """
+    import requests
+
+    base = ""
+    if provider in ("cf_temp_email", "cloudflare_temp_email", ""):
+        base = (os.environ.get("CLOUDMAIL_BASE_URL") or "").rstrip("/")
+    elif provider == "maillab":
+        base = (os.environ.get("MAILLAB_API_URL") or "").rstrip("/")
+    if not base:
+        return
+
+    try:
+        # /admin/address 是 cf_temp_email 独有路由
+        r_admin = requests.get(f"{base}/admin/address", timeout=5)
+        admin_route_alive = r_admin.status_code in (200, 401, 403)
+    except Exception:
+        admin_route_alive = False
+
+    try:
+        # /login 是 maillab 路由(POST);用 GET 探测,期待 405 或 4xx 但**不是** 404
+        r_login = requests.get(f"{base}/login", timeout=5)
+        login_route_alive = r_login.status_code != 404
+    except Exception:
+        login_route_alive = False
+
+    if provider in ("cf_temp_email", "cloudflare_temp_email", ""):
+        # 期待 admin_route_alive=True;若 admin 路由 404 而 login 路由活跃 → 错配
+        if not admin_route_alive and login_route_alive:
+            logger.warning(
+                "[验证] CLOUDMAIL_BASE_URL=%s 看起来不是 dreamhunter2333/cloudflare_temp_email"
+                "(/admin/address 不可达,但 /login 活跃)。如果你用的是 cnitlrt 原版的"
+                "'cloudmail' 服务器,那其实是 maillab/cloud-mail,请改 MAIL_PROVIDER=maillab。",
+                base,
+            )
+    elif provider == "maillab":
+        if not login_route_alive and admin_route_alive:
+            logger.warning(
+                "[验证] MAILLAB_API_URL=%s 看起来不是 maillab/cloud-mail"
+                "(/login 不可达,但 /admin/address 活跃)。这是 dreamhunter2333/cloudflare_temp_email,"
+                "请改 MAIL_PROVIDER=cf_temp_email 并配置 CLOUDMAIL_BASE_URL/PASSWORD。",
+                base,
+            )
+
+
 def _verify_cloudmail():
     """验证 mail provider 配置:登录 + 创建测试邮箱 + 删除。
 
@@ -259,6 +309,10 @@ def _verify_cloudmail():
         return False
 
     logger.info("[验证] %s 配置...", label)
+
+    # 启动前轻量协议嗅探:base_url 路由指纹与 MAIL_PROVIDER 不一致时提前提示,
+    # 避免用户看到"登录成功 → 创建失败"这种半成功假象(issue #1)。
+    _sniff_provider_mismatch(provider)
 
     try:
         from autoteam.cloudmail import CloudMailClient

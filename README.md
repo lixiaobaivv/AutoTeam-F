@@ -80,6 +80,12 @@ uv run autoteam rotate
 
 首次启动会自动引导配置 临时邮箱后端（`cf_temp_email` 默认 / `maillab` 可选）、CPA、API Key，并验证连通性。两种后端的差异见 [配置说明 · Mail Provider 切换](docs/configuration.md#mail-provider-切换)。
 
+> **强烈推荐使用 [`dreamhunter2333/cloudflare_temp_email`](https://github.com/dreamhunter2333/cloudflare_temp_email)**(对应 `MAIL_PROVIDER=cf_temp_email`，默认）。它是 Cloudflare Workers 部署、被广泛验证、与 OpenAI 域名黑名单适配良好。
+>
+> ⚠️ 如果你之前用的是上游 [cnitlrt/AutoTeam](https://github.com/cnitlrt/AutoTeam) 的 "cloudmail"，那其实是 [`maillab/cloud-mail`](https://github.com/maillab/cloud-mail)。本 fork 把它独立成 `MAIL_PROVIDER=maillab` 后端，需要在 `.env` 里显式设置（不再是默认）。详见 [docs/configuration.md#mail-provider-切换](docs/configuration.md#mail-provider-切换)。
+>
+> 启动时会做轻量协议指纹嗅探，base_url 与 `MAIL_PROVIDER` 错配会**提前 warning**，避免出现"登录成功 → 创建邮箱 401"这种半成功假象（[issue #1](https://github.com/ZRainbow1275/AutoTeam-F/issues/1)）。
+
 ### Docker 部署
 
 ```bash
@@ -135,6 +141,7 @@ Linux + Docker 访问宿主机服务，详见 [Docker 部署文档](docs/docker.
 - **邀请 seat 兜底失败时账号被静默丢失** 🆕 — `invite_member` POST/PATCH 都加退避重试,PATCH 失败时保留 `usage_based`(codex-only) 席位,把 `seat_type` 落到 `accounts.json` 供下游差异化对待
 - **`cmd_check` 只扫 active,standby 永远没额度数据** 🆕 — `autoteam check --include-standby`(或 `POST /api/tasks/check {include_standby:true}`)追加探测 standby 池,限速 1.5s + 24h 去重;401/403 标记为 `auth_invalid`
 - **workspace 有席位但本地 auth 缺失的"残废 / 错位 / ghost"账号无人清理** 🆕 — `autoteam reconcile [--dry-run]`(或 `POST /api/admin/reconcile?dry_run=1`)一键识别残废 / 错位 / 耗尽未抛弃 / ghost,可通过 `RECONCILE_KICK_ORPHAN` / `RECONCILE_KICK_GHOST` 控制是 KICK 还是打标记
+- **子号巡检在网络抖动 / 5xx 时被错误标 auth_invalid → 整批号被踢** 🆕 — `check_codex_quota` 新增 `network_error` 分类(DNS / Timeout / SSL / 5xx / 429 / 4xx 非 401/403 / JSON 解析失败 → 临时性故障),`_probe_standby_quota` 看到 `network_error` 不写 `last_quota_check_at`、不改 status,等下一轮立即重试,不再被 24h 去重屏蔽
 
 若你遇到 401 "Must be part of this workspace"，不用 logout 重登：
 
@@ -166,6 +173,7 @@ curl -s -X POST -H "Authorization: Bearer $KEY" http://localhost:8787/api/admin/
 
 ## 已知限制
 
+- **母号被吊销会牵连 personal 号** — 经实测,母号 Team workspace 被 OpenAI 吊销时,从该母号衍生(经 Team 邀请 → leave_workspace → personal OAuth)出来的 free plan personal 号会**一起失效**(`/wham/usage` 返回 401/403)。OpenAI 的风控关联到 IP / device fingerprint / 邀请链路,不仅仅是 workspace 隶属关系。母号失效后,personal 号需要全部重新生产
 - **IP 风险** — VPS 的 IP 容易被 OpenAI/Cloudflare 标记，建议使用住宅代理
 - **并发限制** — 同一时间只允许一个 Playwright 操作
 - **验证码** — OpenAI 验证码有效期短，网络延迟可能导致过期
