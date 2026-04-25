@@ -9,12 +9,16 @@ from pathlib import Path
 import requests
 
 from autoteam.accounts import STATUS_ACTIVE, STATUS_PERSONAL, load_accounts
-from autoteam.textio import parse_env_value, read_text
+from autoteam.textio import parse_env_value, read_text, write_text
 
 logger = logging.getLogger(__name__)
 
+PROJECT_ROOT = Path(__file__).parent.parent.parent
 SUB2API_IMPORT_PATH = "/api/v1/admin/accounts/data"
+SUB2API_ACCOUNTS_PATH = "/api/v1/admin/accounts"
 SUB2API_TIMEOUT = 30
+SUB2API_PAGE_SIZE = 1000
+SUB2API_SYNC_MARK_FILE = PROJECT_ROOT / "data" / "sub2api_synced_accounts.json"
 
 
 def _env(name: str) -> str:
@@ -43,6 +47,15 @@ def _import_url(base_url: str) -> str:
     if base.endswith("/api"):
         return f"{base}/v1/admin/accounts/data"
     return f"{base}{SUB2API_IMPORT_PATH}"
+
+
+def _accounts_url(base_url: str) -> str:
+    base = base_url.rstrip("/")
+    if base.endswith("/api/v1"):
+        return f"{base}/admin/accounts"
+    if base.endswith("/api"):
+        return f"{base}/v1/admin/accounts"
+    return f"{base}{SUB2API_ACCOUNTS_PATH}"
 
 
 def _headers() -> dict[str, str]:
@@ -161,7 +174,7 @@ def _collect_accounts() -> tuple[list[dict], int, int]:
     return payload_accounts, skipped, len(accounts)
 
 
-def _extract_response_data(resp: requests.Response) -> dict:
+def _extract_response_data(resp: requests.Response, action: str = "导入") -> dict | list:
     try:
         body = resp.json()
     except Exception:
@@ -173,7 +186,7 @@ def _extract_response_data(resp: requests.Response) -> dict:
             detail = str(body.get("message") or body.get("detail") or body.get("error") or "")
         if not detail:
             detail = (resp.text or "").strip()[:500]
-        raise RuntimeError(f"SUB2API 导入失败: HTTP {resp.status_code}: {detail}")
+        raise RuntimeError(f"SUB2API {action}失败: HTTP {resp.status_code}: {detail}")
 
     if not isinstance(body, dict):
         return {}
@@ -181,12 +194,220 @@ def _extract_response_data(resp: requests.Response) -> dict:
     code = body.get("code")
     if code not in (None, 0):
         message = body.get("message") or body.get("reason") or "unknown error"
-        raise RuntimeError(f"SUB2API 导入失败: {message}")
+        raise RuntimeError(f"SUB2API {action}失败: {message}")
 
     data = body.get("data")
-    if isinstance(data, dict):
+    if isinstance(data, dict | list):
         return data
     return body
+
+
+def _list_items_from_data(data: dict | list) -> list[dict]:
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if not isinstance(data, dict):
+        return []
+
+    items = data.get("items")
+    if isinstance(items, list):
+        return [item for item in items if isinstance(item, dict)]
+
+    accounts = data.get("accounts")
+    if isinstance(accounts, list):
+        return [item for item in accounts if isinstance(item, dict)]
+
+    return []
+
+
+def _int_value(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _list_existing_accounts(base_url: str, headers: dict[str, str]) -> list[dict]:
+    url = _accounts_url(base_url)
+    page = 1
+    out = []
+
+    while True:
+        params = {"page": page, "page_size": SUB2API_PAGE_SIZE, "platform": "openai", "type": "oauth"}
+        try:
+            resp = requests.get(url, headers=headers, params=params, timeout=SUB2API_TIMEOUT)
+        except requests.RequestException as exc:
+            raise RuntimeError(f"SUB2API 查询现有账号失败: {exc}") from exc
+
+        data = _extract_response_data(resp, "查询现有账号")
+        items = _list_items_from_data(data)
+        out.extend(items)
+
+        total = _int_value(data.get("total")) if isinstance(data, dict) else 0
+        pages = _int_value(data.get("pages")) if isinstance(data, dict) else 0
+        if pages and page >= pages:
+            break
+        if total and len(out) >= total:
+            break
+        if len(items) < SUB2API_PAGE_SIZE:
+            break
+        page += 1
+
+    return out
+
+
+def _clean_string(value) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _account_identity_keys(account: dict) -> set[tuple[str, str]]:
+    credentials = account.get("credentials")
+    if not isinstance(credentials, dict):
+        credentials = {}
+
+    keys = set()
+    for field in ("chatgpt_account_id", "account_id"):
+        value = _clean_string(credentials.get(field) or account.get(field))
+        if value:
+            keys.add(("account_id", value))
+
+    email = _clean_string(credentials.get("email") or account.get("email")).lower()
+    if email:
+        keys.add(("email", email))
+
+    name = _clean_string(account.get("name")).lower()
+    if name:
+        keys.add(("email", name))
+        keys.add(("name", name))
+
+    return keys
+
+
+def _load_sync_marks() -> dict:
+    if not SUB2API_SYNC_MARK_FILE.exists():
+        return {"type": "sub2api-synced-accounts", "version": 1, "accounts": []}
+
+    try:
+        data = json.loads(read_text(SUB2API_SYNC_MARK_FILE))
+    except Exception as exc:
+        logger.warning("[SUB2API] 读取本地同步标记失败，将重建: %s", exc)
+        return {"type": "sub2api-synced-accounts", "version": 1, "accounts": []}
+
+    if not isinstance(data, dict):
+        return {"type": "sub2api-synced-accounts", "version": 1, "accounts": []}
+    if not isinstance(data.get("accounts"), list):
+        data["accounts"] = []
+    return data
+
+
+def _marker_record(account: dict, action: str, synced_at: str) -> dict:
+    credentials = account.get("credentials")
+    if not isinstance(credentials, dict):
+        credentials = {}
+
+    return {
+        "name": _clean_string(account.get("name")),
+        "email": _clean_string(credentials.get("email") or account.get("email")).lower(),
+        "account_id": _clean_string(credentials.get("account_id") or account.get("account_id")),
+        "chatgpt_account_id": _clean_string(
+            credentials.get("chatgpt_account_id") or account.get("chatgpt_account_id") or credentials.get("account_id")
+        ),
+        "platform": _clean_string(account.get("platform") or "openai"),
+        "type": _clean_string(account.get("type") or "oauth"),
+        "last_action": action,
+        "last_synced_at": synced_at,
+    }
+
+
+def _merge_marker_records(existing_records: list, new_records: list[dict]) -> list[dict]:
+    out = [record for record in existing_records if isinstance(record, dict)]
+
+    for new_record in new_records:
+        new_keys = _account_identity_keys(new_record)
+        replace_index = None
+        for index, record in enumerate(out):
+            if _account_identity_keys(record) & new_keys:
+                replace_index = index
+                break
+
+        if replace_index is None:
+            out.append(new_record)
+        else:
+            out[replace_index] = {**out[replace_index], **new_record}
+
+    return out
+
+
+def _write_sync_marks(base_url: str, records: list[tuple[dict, str]]) -> int:
+    if not records:
+        return 0
+
+    synced_at = datetime.now(timezone.utc).isoformat()
+    new_records = [_marker_record(account, action, synced_at) for account, action in records]
+    marker = _load_sync_marks()
+    marker.update(
+        {
+            "type": "sub2api-synced-accounts",
+            "version": 1,
+            "sub2api_url": base_url.rstrip("/"),
+            "updated_at": synced_at,
+            "accounts": _merge_marker_records(marker.get("accounts") or [], new_records),
+        }
+    )
+
+    SUB2API_SYNC_MARK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    write_text(SUB2API_SYNC_MARK_FILE, json.dumps(marker, indent=2, ensure_ascii=False))
+    return len(new_records)
+
+
+def _existing_identity_keys(accounts: list[dict]) -> set[tuple[str, str]]:
+    keys = set()
+    for account in accounts:
+        platform = _clean_string(account.get("platform")).lower()
+        account_type = _clean_string(account.get("type")).lower()
+        if platform and platform != "openai":
+            continue
+        if account_type and account_type != "oauth":
+            continue
+        keys.update(_account_identity_keys(account))
+    return keys
+
+
+def _filter_existing_accounts(
+    accounts: list[dict], existing_keys: set[tuple[str, str]]
+) -> tuple[list[dict], list[dict]]:
+    if not existing_keys:
+        return accounts, []
+
+    out = []
+    existing_skipped = []
+    for account in accounts:
+        if _account_identity_keys(account) & existing_keys:
+            existing_skipped.append(account)
+            continue
+        out.append(account)
+
+    return out, existing_skipped
+
+
+def _successful_imported_accounts(accounts: list[dict], data: dict) -> list[dict]:
+    account_failed = int(data.get("account_failed") or 0)
+    errors = data.get("errors")
+    if account_failed and not isinstance(errors, list):
+        return []
+    if not isinstance(errors, list):
+        return accounts
+
+    failed_names = {
+        _clean_string(error.get("name")).lower()
+        for error in errors
+        if isinstance(error, dict) and (not error.get("kind") or error.get("kind") == "account")
+    }
+    if not failed_names:
+        return accounts
+
+    return [account for account in accounts if _clean_string(account.get("name")).lower() not in failed_names]
 
 
 def sync_to_sub2api():
@@ -201,7 +422,29 @@ def sync_to_sub2api():
             "account_created": 0,
             "account_failed": 0,
             "skipped": skipped,
+            "existing_skipped": 0,
             "total": total,
+            "mark_file": str(SUB2API_SYNC_MARK_FILE),
+            "errors": [],
+        }
+
+    existing_accounts = _list_existing_accounts(base_url, headers)
+    existing_keys = _existing_identity_keys(existing_accounts)
+    sub2api_accounts, existing_skipped_accounts = _filter_existing_accounts(sub2api_accounts, existing_keys)
+    existing_skipped = len(existing_skipped_accounts)
+
+    if not sub2api_accounts:
+        marked = _write_sync_marks(base_url, [(account, "existing") for account in existing_skipped_accounts])
+        logger.info("[SUB2API] 可同步账号均已存在，跳过远端导入")
+        return {
+            "uploaded": 0,
+            "account_created": 0,
+            "account_failed": 0,
+            "skipped": skipped,
+            "existing_skipped": existing_skipped,
+            "total": total,
+            "marked": marked,
+            "mark_file": str(SUB2API_SYNC_MARK_FILE),
             "errors": [],
         }
 
@@ -223,6 +466,14 @@ def sync_to_sub2api():
     except requests.RequestException as exc:
         raise RuntimeError(f"SUB2API 请求失败: {exc}") from exc
     data = _extract_response_data(resp)
+    if not isinstance(data, dict):
+        data = {}
+
+    marked = _write_sync_marks(
+        base_url,
+        [(account, "existing") for account in existing_skipped_accounts]
+        + [(account, "uploaded") for account in _successful_imported_accounts(sub2api_accounts, data)],
+    )
 
     result = {
         "uploaded": len(sub2api_accounts),
@@ -232,14 +483,18 @@ def sync_to_sub2api():
         "account_created": int(data.get("account_created") or 0),
         "account_failed": int(data.get("account_failed") or 0),
         "skipped": skipped,
+        "existing_skipped": existing_skipped,
         "total": total,
+        "marked": marked,
+        "mark_file": str(SUB2API_SYNC_MARK_FILE),
         "errors": data.get("errors") or [],
     }
     logger.info(
-        "[SUB2API] 同步完成: 上传 %d, 创建 %d, 失败 %d, 跳过 %d",
+        "[SUB2API] 同步完成: 上传 %d, 创建 %d, 失败 %d, 本地跳过 %d, 已存在跳过 %d",
         result["uploaded"],
         result["account_created"],
         result["account_failed"],
         result["skipped"],
+        result["existing_skipped"],
     )
     return result
