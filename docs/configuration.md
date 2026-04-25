@@ -10,10 +10,15 @@ cp .env.example .env
 
 | 配置项 | 说明 | 必填 |
 |--------|------|------|
-| `CLOUDMAIL_BASE_URL` | CloudMail API 地址 | 是 |
-| `CLOUDMAIL_EMAIL` | CloudMail 登录邮箱 | 是 |
-| `CLOUDMAIL_PASSWORD` | CloudMail 登录密码 | 是 |
-| `CLOUDMAIL_DOMAIN` | 临时邮箱域名（如 `@example.com`） | 是 |
+| `MAIL_PROVIDER` | 临时邮箱后端,`cf_temp_email`(默认) 或 `maillab` | 否 |
+| `CLOUDMAIL_BASE_URL` | cf_temp_email 后端的 API 地址 | `MAIL_PROVIDER=cf_temp_email` 时是 |
+| `CLOUDMAIL_PASSWORD` | cf_temp_email 后端的管理员密码 | `MAIL_PROVIDER=cf_temp_email` 时是 |
+| `CLOUDMAIL_DOMAIN` | 临时邮箱域名(如 `@example.com`) | 是 |
+| `CLOUDMAIL_EMAIL` | 已废弃,保留只为兼容旧 `.env`;不再被使用 | 否 |
+| `MAILLAB_API_URL` | maillab/cloud-mail 后端的 API 地址 | `MAIL_PROVIDER=maillab` 时是 |
+| `MAILLAB_USERNAME` | maillab 主账号邮箱(用于登录) | `MAIL_PROVIDER=maillab` 时是 |
+| `MAILLAB_PASSWORD` | maillab 主账号密码 | `MAIL_PROVIDER=maillab` 时是 |
+| `MAILLAB_DOMAIN` | maillab 创建邮箱时的域名;缺省回落 `CLOUDMAIL_DOMAIN` | 否 |
 | `CPA_URL` | CLIProxyAPI 地址 | 是（留空使用默认 `http://127.0.0.1:8317`） |
 | `CPA_KEY` | CPA 管理密钥 | 是 |
 | `API_KEY` | Web 面板 / API 鉴权密钥 | 是（首次启动可自动生成） |
@@ -22,6 +27,33 @@ cp .env.example .env
 | `AUTO_CHECK_THRESHOLD` | 额度低于此百分比触发轮转 | 否（默认 `10`） |
 | `AUTO_CHECK_INTERVAL` | 巡检间隔（秒） | 否（默认 `300`） |
 | `AUTO_CHECK_MIN_LOW` | 至少几个账号低于阈值才触发 | 否（默认 `2`） |
+
+## Mail Provider 切换
+
+AutoTeam 支持两个临时邮箱后端,通过 `MAIL_PROVIDER` 环境变量切换:
+
+| Provider          | 上游仓库                                 | 适配字段                                                  |
+| ----------------- | ---------------------------------------- | --------------------------------------------------------- |
+| `cf_temp_email`   | `dreamhunter2333/cloudflare_temp_email`  | `CLOUDMAIL_BASE_URL` / `CLOUDMAIL_PASSWORD` / `CLOUDMAIL_DOMAIN` |
+| `maillab`         | `maillab/cloud-mail`                     | `MAILLAB_API_URL` / `MAILLAB_USERNAME` / `MAILLAB_PASSWORD` / `MAILLAB_DOMAIN` |
+
+> 命名说明:旧版的 `CLOUDMAIL_*` 配置实际指向的是 `cloudflare_temp_email`,
+> 与 `maillab/cloud-mail`(社区里另一个同名项目)是两个不同的后端,因此在
+> v2026-04 起拆分了两套配置。`MAIL_PROVIDER` 缺省为 `cf_temp_email`,与历史行为完全一致。
+
+切换方法:在 `.env` 中显式设置:
+
+```dotenv
+# 用社区 maillab/cloud-mail
+MAIL_PROVIDER=maillab
+MAILLAB_API_URL=https://your-maillab.example.com
+MAILLAB_USERNAME=admin@example.com
+MAILLAB_PASSWORD=xxx
+MAILLAB_DOMAIN=@example.com
+```
+
+业务调用方零改动:`from autoteam.cloudmail import CloudMailClient` 仍然有效,
+工厂会按 `MAIL_PROVIDER` 自动 dispatch 到对应 provider 实例。
 
 ## Playwright 代理
 

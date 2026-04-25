@@ -1,177 +1,128 @@
-from autoteam import accounts, cloudmail
+"""测试 cf_temp_email provider。
+
+注:历史 cloud-mail API(`/account/list` `/email/list` `/email/latest`)在 cloudmail.py
+切到 dreamhunter2333/cloudflare_temp_email 时已经不再适用,这些用例改为针对当前
+`/admin/*` 路由的实现。OTP 提取测试与后端无关,沿用原断言。
+"""
+
+from autoteam import accounts
+from autoteam.mail import cf_temp_email
 
 
-def test_resolve_account_id_falls_back_to_account_list(monkeypatch):
-    client = cloudmail.CloudMailClient()
-    target_email = "tmp-user@example.com"
+def test_search_emails_by_recipient_returns_normalized_records(monkeypatch):
+    client = cf_temp_email.CfTempEmailClient()
+    target = "tmp-user@example.com"
 
     monkeypatch.setattr(accounts, "load_accounts", lambda: [])
-    monkeypatch.setattr(
-        client,
-        "list_accounts",
-        lambda size=200: [
-            {"accountId": 43, "email": target_email},
-        ],
+
+    class _Resp:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    raw_mime = (
+        "From: noreply@tm.openai.com\r\n"
+        f"To: {target}\r\n"
+        "Subject: Your ChatGPT code is 189799\r\n"
+        "Message-ID: <abc@x>\r\n"
+        "\r\n"
+        "Your ChatGPT code is 189799\r\n"
     )
 
-    assert client._resolve_account_id_for_email(target_email.upper()) == 43
-
-
-def test_search_emails_by_recipient_falls_back_to_email_latest(monkeypatch):
-    client = cloudmail.CloudMailClient()
-    target_email = "tmp-user@example.com"
-    calls = []
-
-    monkeypatch.setattr(accounts, "load_accounts", lambda: [])
-
     def fake_get(path, params=None):
-        calls.append((path, params))
-        if path == "/account/list":
-            return {
-                "code": 200,
-                "data": [
-                    {"accountId": 43, "email": target_email},
-                ],
-            }
-        if path == "/email/list":
-            return {
-                "code": 200,
-                "data": {
-                    "list": [],
-                    "total": 0,
-                    "latestEmail": {"emailId": 15, "accountId": 43, "userId": 1},
-                },
-            }
-        if path == "/email/latest":
-            return {
-                "code": 200,
-                "data": [
+        assert path == "/admin/mails"
+        assert (params or {}).get("address") == target
+        return _Resp(
+            {
+                "results": [
                     {
-                        "emailId": 15,
-                        "accountId": 43,
-                        "sendEmail": "noreply@tm.openai.com",
-                        "subject": "Your ChatGPT code is 189799",
-                        "content": "Your ChatGPT code is 189799",
+                        "id": 15,
+                        "address": target,
+                        "raw": raw_mime,
+                        "source": "noreply@tm.openai.com",
+                        "created_at": 1761331200,
                     }
-                ],
+                ]
             }
-        raise AssertionError(f"unexpected path: {path}")
+        )
 
-    monkeypatch.setattr(client, "_get", fake_get)
+    monkeypatch.setattr(client, "_admin_get", fake_get)
 
-    emails = client.search_emails_by_recipient(target_email, size=5)
+    emails = client.search_emails_by_recipient(target, size=5)
 
     assert len(emails) == 1
     assert emails[0]["emailId"] == 15
     assert emails[0]["subject"] == "Your ChatGPT code is 189799"
-    assert ("/email/latest", {"emailId": 0, "accountId": 43, "allReceive": 0}) in calls
+    assert emails[0]["sendEmail"] == "noreply@tm.openai.com"
+    assert emails[0]["accountEmail"] == target
+    assert emails[0]["createTime"] == 1761331200
 
 
-def test_search_emails_by_recipient_ignores_unrelated_global_results(monkeypatch):
-    client = cloudmail.CloudMailClient()
-    target_email = "tmp-user@example.com"
+def test_search_emails_by_recipient_filters_unrelated_address(monkeypatch):
+    client = cf_temp_email.CfTempEmailClient()
+    target = "tmp-user@example.com"
 
     monkeypatch.setattr(accounts, "load_accounts", lambda: [])
 
+    class _Resp:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
     def fake_get(path, params=None):
-        if path == "/account/list":
-            return {
-                "code": 200,
-                "data": [
-                    {"accountId": 43, "email": target_email},
-                ],
+        return _Resp(
+            {
+                "results": [
+                    {
+                        "id": 410,
+                        "address": "someone-else@example.com",
+                        "raw": "Subject: Other\r\n\r\nbody",
+                    }
+                ]
             }
-        if path == "/email/list":
-            return {
-                "code": 200,
-                "data": {
-                    "list": [],
-                    "total": 0,
-                },
-            }
-        if path == "/email/latest":
-            return {
-                "code": 200,
-                "data": [],
-            }
-        if path == "/allEmail/list":
-            return {
-                "code": 200,
-                "data": {
-                    "list": [
-                        {
-                            "emailId": 410,
-                            "accountId": 999,
-                            "accountEmail": "someone-else@example.com",
-                            "sendEmail": "noreply@tm.openai.com",
-                            "subject": "Your ChatGPT code is 202123",
-                            "content": "Your ChatGPT code is 202123",
-                        }
-                    ]
-                },
-            }
-        raise AssertionError(f"unexpected path: {path}")
+        )
 
-    monkeypatch.setattr(client, "_get", fake_get)
+    monkeypatch.setattr(client, "_admin_get", fake_get)
 
-    emails = client.search_emails_by_recipient(target_email, size=5)
+    emails = client.search_emails_by_recipient(target, size=5)
 
     assert emails == []
 
 
-def test_search_emails_by_recipient_accepts_global_results_for_matching_account(monkeypatch):
-    client = cloudmail.CloudMailClient()
-    target_email = "tmp-user@example.com"
+def test_resolve_address_id_accepts_int_and_email(monkeypatch):
+    client = cf_temp_email.CfTempEmailClient()
 
-    monkeypatch.setattr(accounts, "load_accounts", lambda: [])
+    assert client._resolve_address_id(43) == 43
+    assert client._resolve_address_id("43") == 43
+
+    class _Resp:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
 
     def fake_get(path, params=None):
-        if path == "/account/list":
-            return {
-                "code": 200,
-                "data": [
-                    {"accountId": 43, "email": target_email},
-                ],
-            }
-        if path == "/email/list":
-            return {
-                "code": 200,
-                "data": {
-                    "list": [],
-                    "total": 0,
-                },
-            }
-        if path == "/email/latest":
-            return {
-                "code": 200,
-                "data": [],
-            }
-        if path == "/allEmail/list":
-            return {
-                "code": 200,
-                "data": {
-                    "list": [
-                        {
-                            "emailId": 411,
-                            "accountId": 43,
-                            "sendEmail": "noreply@tm.openai.com",
-                            "subject": "Your ChatGPT code is 654321",
-                            "content": "Your ChatGPT code is 654321",
-                        }
-                    ]
-                },
-            }
-        raise AssertionError(f"unexpected path: {path}")
+        assert path == "/admin/address"
+        return _Resp({"results": [{"id": 99, "name": "user@example.com"}]})
 
-    monkeypatch.setattr(client, "_get", fake_get)
+    monkeypatch.setattr(client, "_admin_get", fake_get)
 
-    emails = client.search_emails_by_recipient(target_email, size=5)
-
-    assert [email["emailId"] for email in emails] == [411]
+    assert client._resolve_address_id("user@example.com") == 99
 
 
 def test_extract_verification_code_prefers_visible_text_over_html_color_values():
-    client = cloudmail.CloudMailClient()
+    client = cf_temp_email.CfTempEmailClient()
 
     email_data = {
         "text": None,
@@ -195,7 +146,7 @@ def test_extract_verification_code_prefers_visible_text_over_html_color_values()
 
 
 def test_extract_verification_code_uses_plain_text_when_available():
-    client = cloudmail.CloudMailClient()
+    client = cf_temp_email.CfTempEmailClient()
 
     email_data = {
         "text": "Your temporary OpenAI login code is 123456",
@@ -203,3 +154,32 @@ def test_extract_verification_code_uses_plain_text_when_available():
     }
 
     assert client.extract_verification_code(email_data) == "123456"
+
+
+def test_factory_returns_cf_temp_email_by_default(monkeypatch):
+    """工厂 + 别名兼容性:`from autoteam.cloudmail import CloudMailClient` 调用零改动。"""
+    monkeypatch.delenv("MAIL_PROVIDER", raising=False)
+    from autoteam.cloudmail import CloudMailClient
+
+    client = CloudMailClient()
+    assert isinstance(client, cf_temp_email.CfTempEmailClient)
+
+
+def test_factory_dispatches_to_maillab_when_configured(monkeypatch):
+    monkeypatch.setenv("MAIL_PROVIDER", "maillab")
+    monkeypatch.setenv("MAILLAB_API_URL", "http://example.com")
+    from autoteam.cloudmail import CloudMailClient
+    from autoteam.mail.maillab import MaillabClient
+
+    client = CloudMailClient()
+    assert isinstance(client, MaillabClient)
+
+
+def test_factory_rejects_unknown_provider(monkeypatch):
+    import pytest
+
+    monkeypatch.setenv("MAIL_PROVIDER", "made-up")
+    from autoteam.mail import get_mail_client
+
+    with pytest.raises(ValueError, match="未知 MAIL_PROVIDER"):
+        get_mail_client()

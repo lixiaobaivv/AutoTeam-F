@@ -15,11 +15,18 @@ ENV_FILE = PROJECT_ROOT / ".env"
 ENV_EXAMPLE = PROJECT_ROOT / ".env.example"
 
 # 需要交互式输入的配置项（key, 提示, 默认值, 是否可选）
+# CLOUDMAIL_EMAIL 已废弃 → 不再列入 REQUIRED_CONFIGS（cf_temp_email 后端只看 PASSWORD,
+# maillab 后端用 MAILLAB_USERNAME 替代）
 REQUIRED_CONFIGS = [
-    ("CLOUDMAIL_BASE_URL", "CloudMail API 地址", "", False),
-    ("CLOUDMAIL_EMAIL", "CloudMail 登录邮箱", "", False),
-    ("CLOUDMAIL_PASSWORD", "CloudMail 登录密码", "", False),
-    ("CLOUDMAIL_DOMAIN", "CloudMail 邮箱域名（如 @example.com）", "", False),
+    (
+        "MAIL_PROVIDER",
+        "Mail Provider（cf_temp_email = dreamhunter2333 临时邮箱; maillab = maillab/cloud-mail）",
+        "cf_temp_email",
+        True,
+    ),
+    ("CLOUDMAIL_BASE_URL", "CloudMail API 地址（cf_temp_email 后端）", "", False),
+    ("CLOUDMAIL_PASSWORD", "CloudMail 管理员密码（cf_temp_email 后端）", "", False),
+    ("CLOUDMAIL_DOMAIN", "邮箱域名（如 @example.com）", "", False),
     ("CPA_URL", "CPA (CLIProxyAPI) 地址", "http://127.0.0.1:8317", False),
     ("CPA_KEY", "CPA 管理密钥", "", False),
     ("PLAYWRIGHT_PROXY_URL", "Playwright 浏览器代理 URL（可选，如 socks5://host:port）", "", True),
@@ -164,26 +171,48 @@ def check_and_setup(interactive: bool = True) -> bool:
 
 
 def _verify_cloudmail():
-    """验证 CloudMail 配置是否正确：登录 + 创建测试邮箱 + 删除"""
-    base_url = os.environ.get("CLOUDMAIL_BASE_URL", "")
-    email = os.environ.get("CLOUDMAIL_EMAIL", "")
-    password = os.environ.get("CLOUDMAIL_PASSWORD", "")
-    domain = os.environ.get("CLOUDMAIL_DOMAIN", "")
+    """验证 mail provider 配置:登录 + 创建测试邮箱 + 删除。
 
-    if not all([base_url, email, password, domain]):
-        return
+    根据 MAIL_PROVIDER 自动走对应分支:
+      - cf_temp_email(默认):需要 CLOUDMAIL_BASE_URL / CLOUDMAIL_PASSWORD / CLOUDMAIL_DOMAIN
+      - maillab:需要 MAILLAB_API_URL / MAILLAB_USERNAME / MAILLAB_PASSWORD / MAILLAB_DOMAIN(或回落 CLOUDMAIL_DOMAIN)
+    """
+    provider = (os.environ.get("MAIL_PROVIDER") or "cf_temp_email").strip().lower()
 
-    logger.info("[验证] CloudMail 配置...")
+    if provider in ("cf_temp_email", "cloudflare_temp_email", ""):
+        base_url = os.environ.get("CLOUDMAIL_BASE_URL", "")
+        password = os.environ.get("CLOUDMAIL_PASSWORD", "")
+        domain = os.environ.get("CLOUDMAIL_DOMAIN", "")
+        if not all([base_url, password, domain]):
+            return
+        check_keys = "CLOUDMAIL_BASE_URL、CLOUDMAIL_PASSWORD"
+        domain_key = "CLOUDMAIL_DOMAIN"
+        label = "CloudMail (cf_temp_email)"
+    elif provider == "maillab":
+        api_url = os.environ.get("MAILLAB_API_URL", "")
+        username = os.environ.get("MAILLAB_USERNAME", "")
+        password = os.environ.get("MAILLAB_PASSWORD", "")
+        domain = os.environ.get("MAILLAB_DOMAIN") or os.environ.get("CLOUDMAIL_DOMAIN", "")
+        if not all([api_url, username, password, domain]):
+            return
+        check_keys = "MAILLAB_API_URL、MAILLAB_USERNAME、MAILLAB_PASSWORD"
+        domain_key = "MAILLAB_DOMAIN"
+        label = "maillab"
+    else:
+        logger.error("[验证] 未知 MAIL_PROVIDER=%s,可选: cf_temp_email | maillab", provider)
+        return False
+
+    logger.info("[验证] %s 配置...", label)
 
     try:
         from autoteam.cloudmail import CloudMailClient
 
         client = CloudMailClient()
         client.login()
-        logger.info("[验证] CloudMail 登录成功")
+        logger.info("[验证] %s 登录成功", label)
     except Exception as e:
-        logger.error("[验证] CloudMail 登录失败: %s", e)
-        logger.error("[验证] 请检查 CLOUDMAIL_BASE_URL、CLOUDMAIL_EMAIL、CLOUDMAIL_PASSWORD")
+        logger.error("[验证] %s 登录失败: %s", label, e)
+        logger.error("[验证] 请检查 %s", check_keys)
         return False
 
     test_account_id = None
@@ -191,20 +220,20 @@ def _verify_cloudmail():
         import uuid as _uuid
 
         test_account_id, test_email = client.create_temp_email(prefix=f"at-test-{_uuid.uuid4().hex[:6]}")
-        logger.info("[验证] CloudMail 创建测试邮箱成功: %s", test_email)
+        logger.info("[验证] %s 创建测试邮箱成功: %s", label, test_email)
     except Exception as e:
-        logger.error("[验证] CloudMail 创建邮箱失败: %s", e)
-        logger.error("[验证] 请检查 CLOUDMAIL_DOMAIN 是否正确")
+        logger.error("[验证] %s 创建邮箱失败: %s", label, e)
+        logger.error("[验证] 请检查 %s 是否正确", domain_key)
         return False
 
     try:
         if test_account_id:
             client.delete_account(test_account_id)
-            logger.info("[验证] CloudMail 测试邮箱已清理")
+            logger.info("[验证] %s 测试邮箱已清理", label)
     except Exception as e:
-        logger.warning("[验证] CloudMail 清理测试邮箱失败: %s（不影响使用）", e)
+        logger.warning("[验证] %s 清理测试邮箱失败: %s(不影响使用)", label, e)
 
-    logger.info("[验证] CloudMail 配置验证通过")
+    logger.info("[验证] %s 配置验证通过", label)
     return True
 
 
