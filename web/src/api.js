@@ -92,6 +92,10 @@ export const api = {
   getAutoCheckConfig: () => request('GET', '/config/auto-check'),
   setAutoCheckConfig: (cfg) => request('PUT', '/config/auto-check', cfg),
 
+  getSub2apiConfig: () => request('GET', '/config/sub2api'),
+  setSub2apiConfig: (cfg) => request('PUT', '/config/sub2api', cfg),
+  getSub2apiGroups: () => request('GET', '/config/sub2api/groups'),
+
   getRegisterDomain: () => request('GET', '/config/register-domain'),
   setRegisterDomain: (domain, verify = true) => request('PUT', '/config/register-domain', { domain, verify }),
 

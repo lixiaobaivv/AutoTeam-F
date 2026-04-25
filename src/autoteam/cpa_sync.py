@@ -602,6 +602,29 @@ def sync_to_cpa():
         len(final_local_managed),
         len(files_to_sync),
     )
+    _sync_to_sub2api_after_cpa_if_enabled()
+
+
+def _sync_to_sub2api_after_cpa_if_enabled():
+    """CPA 同步完成后的可选 SUB2API 联动同步。失败只记日志，不影响 CPA 主流程。"""
+    from autoteam.sub2api_sync import is_auto_sync_enabled, sync_to_sub2api
+
+    if not is_auto_sync_enabled():
+        return None
+
+    try:
+        result = sync_to_sub2api()
+    except RuntimeError as exc:
+        logger.error("[SUB2API] CPA 后置同步失败: %s", exc)
+        return {"error": str(exc)}
+
+    logger.info(
+        "[SUB2API] CPA 后置同步完成: 上传 %d, 已存在跳过 %d, 远端更新 %d",
+        result.get("uploaded", 0),
+        result.get("existing_skipped", 0),
+        result.get("remote_updated", 0),
+    )
+    return result
 
 
 def sync_main_codex_to_cpa(filepath):

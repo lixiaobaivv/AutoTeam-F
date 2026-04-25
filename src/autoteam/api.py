@@ -11,7 +11,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from autoteam.config import API_KEY
 from autoteam.textio import read_text
@@ -382,6 +382,19 @@ class TeamMemberRemoveParams(BaseModel):
 class RegisterDomainParams(BaseModel):
     domain: str
     verify: bool = True  # 默认写入前试探一次 CloudMail 是否接受该域
+
+
+class Sub2apiConfigParams(BaseModel):
+    url: str = ""
+    auth_mode: str = "api_key"
+    api_key: str = ""
+    token: str = ""
+    clear_api_key: bool = False
+    clear_token: bool = False
+    auto_sync: bool = False
+    skip_default_group_bind: bool = True
+    group_ids: list[int] = Field(default_factory=list)
+    concurrency: int = 10
 
 
 class DeleteBatchParams(BaseModel):
@@ -1616,6 +1629,33 @@ def post_sync_to_sub2api():
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"message": "已同步到 SUB2API", "result": result}
+
+
+@app.get("/api/config/sub2api")
+def get_sub2api_config_api():
+    """读取 SUB2API 同步配置，不回显密钥明文。"""
+    from autoteam.runtime_config import get_sub2api_config
+
+    return get_sub2api_config(include_secrets=False)
+
+
+@app.put("/api/config/sub2api")
+def put_sub2api_config_api(params: Sub2apiConfigParams):
+    """保存 SUB2API 同步配置。空密钥表示保留现有密钥。"""
+    from autoteam.runtime_config import set_sub2api_config
+
+    return set_sub2api_config(params.model_dump())
+
+
+@app.get("/api/config/sub2api/groups")
+def get_sub2api_groups_api():
+    """读取 SUB2API OpenAI 分组，供面板选择目标分组。"""
+    from autoteam import sub2api_sync
+
+    try:
+        return {"items": sub2api_sync.list_sub2api_groups()}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/register-failures")

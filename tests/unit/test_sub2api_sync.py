@@ -39,6 +39,9 @@ def _clear_sub2api_env(monkeypatch):
         "SUB2API_TOKEN",
         "SUB2API_ADMIN_TOKEN",
         "SUB2API_SKIP_DEFAULT_GROUP_BIND",
+        "SUB2API_GROUP_IDS",
+        "SUB2API_CONCURRENCY",
+        "SUB2API_AUTO_SYNC",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -126,7 +129,7 @@ def test_sync_to_sub2api_posts_active_and_personal_accounts(tmp_path, monkeypatc
     assert [item["name"] for item in imported] == ["active@example.com", "personal@example.com"]
     assert {item["platform"] for item in imported} == {"openai"}
     assert {item["type"] for item in imported} == {"oauth"}
-    assert {item["concurrency"] for item in imported} == {1}
+    assert {item["concurrency"] for item in imported} == {10}
     assert {item["priority"] for item in imported} == {0}
     assert all(item["extra"]["openai_passthrough"] is True for item in imported)
 
@@ -218,6 +221,199 @@ def test_sync_to_sub2api_skips_accounts_that_already_exist(tmp_path, monkeypatch
 
     imported = captured_post["json"]["data"]["accounts"]
     assert [item["name"] for item in imported] == ["new@example.com"]
+
+
+def test_sync_to_sub2api_applies_group_and_concurrency_to_uploaded_accounts(tmp_path, monkeypatch):
+    from autoteam import accounts as accounts_mod
+    from autoteam import sub2api_sync
+
+    auth_file = tmp_path / "codex-active.json"
+    _write_auth(auth_file, "active@example.com", "acc-active")
+    monkeypatch.setattr(
+        sub2api_sync,
+        "load_accounts",
+        lambda: [{"email": "active@example.com", "status": accounts_mod.STATUS_ACTIVE, "auth_file": str(auth_file)}],
+    )
+    _clear_sub2api_env(monkeypatch)
+    monkeypatch.setenv("SUB2API_URL", "https://sub2api.example.com")
+    monkeypatch.setenv("SUB2API_API_KEY", "admin-key")
+    monkeypatch.setenv("SUB2API_GROUP_IDS", "7, 9")
+    monkeypatch.setenv("SUB2API_CONCURRENCY", "12")
+
+    get_calls = []
+    put_calls = []
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        get_calls.append((url, params))
+        items = []
+        if len(get_calls) > 1:
+            items = [
+                {
+                    "id": 123,
+                    "name": "active@example.com",
+                    "platform": "openai",
+                    "type": "oauth",
+                    "credentials": {
+                        "email": "active@example.com",
+                        "account_id": "acc-active",
+                    },
+                }
+            ]
+        return FakeResponse(
+            data={"code": 0, "data": {"items": items, "total": len(items), "page": 1, "page_size": 1000}}
+        )
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        assert json["data"]["accounts"][0]["concurrency"] == 12
+        return FakeResponse(data={"code": 0, "data": {"account_created": 1, "account_failed": 0}})
+
+    def fake_put(url, headers=None, json=None, timeout=None):
+        put_calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+        return FakeResponse(data={"code": 0, "data": {"id": 123}})
+
+    monkeypatch.setattr(sub2api_sync.requests, "get", fake_get)
+    monkeypatch.setattr(sub2api_sync.requests, "post", fake_post)
+    monkeypatch.setattr(sub2api_sync.requests, "put", fake_put)
+
+    result = sub2api_sync.sync_to_sub2api()
+
+    assert result["uploaded"] == 1
+    assert result["remote_updated"] == 1
+    assert result["target_group_ids"] == [7, 9]
+    assert put_calls == [
+        {
+            "url": "https://sub2api.example.com/api/v1/admin/accounts/123",
+            "headers": {"x-api-key": "admin-key"},
+            "json": {"concurrency": 12, "group_ids": [7, 9], "confirm_mixed_channel_risk": True},
+            "timeout": 30,
+        }
+    ]
+
+
+def test_sync_to_sub2api_updates_existing_accounts_when_group_changes(tmp_path, monkeypatch):
+    from autoteam import accounts as accounts_mod
+    from autoteam import sub2api_sync
+
+    auth_file = tmp_path / "codex-existing.json"
+    _write_auth(auth_file, "existing@example.com", "acc-existing")
+    monkeypatch.setattr(
+        sub2api_sync,
+        "load_accounts",
+        lambda: [{"email": "existing@example.com", "status": accounts_mod.STATUS_ACTIVE, "auth_file": str(auth_file)}],
+    )
+    _clear_sub2api_env(monkeypatch)
+    monkeypatch.setenv("SUB2API_URL", "https://sub2api.example.com")
+    monkeypatch.setenv("SUB2API_API_KEY", "admin-key")
+    monkeypatch.setenv("SUB2API_GROUP_IDS", "5")
+
+    put_calls = []
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        return FakeResponse(
+            data={
+                "code": 0,
+                "data": {
+                    "items": [
+                        {
+                            "id": 456,
+                            "name": "existing@example.com",
+                            "platform": "openai",
+                            "type": "oauth",
+                            "credentials": {"account_id": "acc-existing"},
+                        }
+                    ],
+                    "total": 1,
+                    "page": 1,
+                    "page_size": 1000,
+                },
+            }
+        )
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        raise AssertionError("已存在账号不应该再次 POST 导入")
+
+    def fake_put(url, headers=None, json=None, timeout=None):
+        put_calls.append({"url": url, "json": json})
+        return FakeResponse(data={"code": 0, "data": {"id": 456}})
+
+    monkeypatch.setattr(sub2api_sync.requests, "get", fake_get)
+    monkeypatch.setattr(sub2api_sync.requests, "post", fake_post)
+    monkeypatch.setattr(sub2api_sync.requests, "put", fake_put)
+
+    result = sub2api_sync.sync_to_sub2api()
+
+    assert result["uploaded"] == 0
+    assert result["existing_skipped"] == 1
+    assert result["remote_updated"] == 1
+    assert put_calls == [
+        {
+            "url": "https://sub2api.example.com/api/v1/admin/accounts/456",
+            "json": {"concurrency": 10, "group_ids": [5], "confirm_mixed_channel_risk": True},
+        }
+    ]
+
+
+def test_sync_to_sub2api_updates_existing_account_concurrency_without_group(tmp_path, monkeypatch):
+    from autoteam import accounts as accounts_mod
+    from autoteam import sub2api_sync
+
+    auth_file = tmp_path / "codex-existing.json"
+    _write_auth(auth_file, "existing@example.com", "acc-existing")
+    monkeypatch.setattr(
+        sub2api_sync,
+        "load_accounts",
+        lambda: [{"email": "existing@example.com", "status": accounts_mod.STATUS_ACTIVE, "auth_file": str(auth_file)}],
+    )
+    _clear_sub2api_env(monkeypatch)
+    monkeypatch.setenv("SUB2API_URL", "https://sub2api.example.com")
+    monkeypatch.setenv("SUB2API_API_KEY", "admin-key")
+    monkeypatch.setenv("SUB2API_CONCURRENCY", "15")
+
+    put_calls = []
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        return FakeResponse(
+            data={
+                "code": 0,
+                "data": {
+                    "items": [
+                        {
+                            "id": 456,
+                            "name": "existing@example.com",
+                            "platform": "openai",
+                            "type": "oauth",
+                            "credentials": {"account_id": "acc-existing"},
+                        }
+                    ],
+                    "total": 1,
+                    "page": 1,
+                    "page_size": 1000,
+                },
+            }
+        )
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        raise AssertionError("已存在账号不应该再次 POST 导入")
+
+    def fake_put(url, headers=None, json=None, timeout=None):
+        put_calls.append({"url": url, "json": json})
+        return FakeResponse(data={"code": 0, "data": {"id": 456}})
+
+    monkeypatch.setattr(sub2api_sync.requests, "get", fake_get)
+    monkeypatch.setattr(sub2api_sync.requests, "post", fake_post)
+    monkeypatch.setattr(sub2api_sync.requests, "put", fake_put)
+
+    result = sub2api_sync.sync_to_sub2api()
+
+    assert result["uploaded"] == 0
+    assert result["existing_skipped"] == 1
+    assert result["remote_updated"] == 1
+    assert put_calls == [
+        {
+            "url": "https://sub2api.example.com/api/v1/admin/accounts/456",
+            "json": {"concurrency": 15, "confirm_mixed_channel_risk": True},
+        }
+    ]
 
 
 def test_sync_to_sub2api_does_not_post_when_all_accounts_already_exist(tmp_path, monkeypatch):

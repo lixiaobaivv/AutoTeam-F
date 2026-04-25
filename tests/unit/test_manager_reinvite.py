@@ -17,6 +17,7 @@ def test_reinvite_account_uses_unified_oauth_login_and_marks_active(monkeypatch)
         },
     )
     monkeypatch.setattr(manager, "save_auth_file", lambda bundle: f"/tmp/{bundle['email']}.json")
+    monkeypatch.setattr(manager, "check_codex_quota", lambda access_token: ("ok", {"primary_pct": 0}))
     monkeypatch.setattr(
         manager,
         "update_account",
@@ -40,11 +41,17 @@ def test_reinvite_account_uses_unified_oauth_login_and_marks_active(monkeypatch)
         (
             "tmp-user@example.com",
             {
+                "last_quota": {"primary_pct": 0},
+            },
+        ),
+        (
+            "tmp-user@example.com",
+            {
                 "status": accounts.STATUS_ACTIVE,
                 "last_active_at": 1234567890,
                 "auth_file": "/tmp/tmp-user@example.com.json",
             },
-        )
+        ),
     ]
 
 

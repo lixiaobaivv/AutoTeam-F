@@ -318,6 +318,158 @@
     </div>
 
     <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+      <div class="flex items-center justify-between gap-4 mb-4">
+        <h2 class="text-lg font-semibold text-white">SUB2API 同步</h2>
+        <span v-if="sub2apiSaved" class="text-xs text-green-400 transition">已保存</span>
+      </div>
+
+      <div v-if="sub2apiMessage" class="mb-4 px-4 py-3 rounded-lg text-sm border" :class="sub2apiMessageClass">
+        {{ sub2apiMessage }}
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="md:col-span-2">
+          <label class="block text-sm text-gray-400 mb-1">SUB2API 地址</label>
+          <input
+            v-model.trim="sub2apiForm.url"
+            type="url"
+            placeholder="https://sub2api.example.com"
+            class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500"
+          />
+        </div>
+
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">鉴权方式</label>
+          <div class="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              @click="sub2apiForm.auth_mode = 'api_key'"
+              class="px-3 py-2 rounded-lg border text-sm transition"
+              :class="sub2apiForm.auth_mode === 'api_key'
+                ? 'bg-blue-600 text-white border-blue-500'
+                : 'bg-gray-800 text-gray-300 border-gray-700 hover:bg-gray-700'"
+            >
+              API Key
+            </button>
+            <button
+              type="button"
+              @click="sub2apiForm.auth_mode = 'token'"
+              class="px-3 py-2 rounded-lg border text-sm transition"
+              :class="sub2apiForm.auth_mode === 'token'
+                ? 'bg-blue-600 text-white border-blue-500'
+                : 'bg-gray-800 text-gray-300 border-gray-700 hover:bg-gray-700'"
+            >
+              Token
+            </button>
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">
+            {{ sub2apiForm.auth_mode === 'api_key' ? 'API Key' : 'Token' }}
+          </label>
+          <input
+            v-if="sub2apiForm.auth_mode === 'api_key'"
+            v-model.trim="sub2apiForm.api_key"
+            type="password"
+            :placeholder="sub2apiForm.api_key_configured ? '已配置，留空保留' : '输入 API Key'"
+            class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500"
+          />
+          <input
+            v-else
+            v-model.trim="sub2apiForm.token"
+            type="password"
+            :placeholder="sub2apiForm.token_configured ? '已配置，留空保留' : '输入 Token'"
+            class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500"
+          />
+        </div>
+
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">并发额度</label>
+          <input
+            v-model.number="sub2apiForm.concurrency"
+            type="number"
+            min="1"
+            max="1000"
+            class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500"
+          />
+        </div>
+
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">目标分组 ID</label>
+          <input
+            v-model.trim="sub2apiForm.group_ids_text"
+            type="text"
+            placeholder="例如 7, 9"
+            class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500"
+          />
+        </div>
+
+        <label class="flex items-center justify-between gap-4 px-3 py-2 bg-gray-800/60 border border-gray-800 rounded-lg">
+          <span class="text-sm text-gray-300">自动跟随 CPA 同步</span>
+          <input
+            v-model="sub2apiForm.auto_sync"
+            type="checkbox"
+            class="h-4 w-4 rounded border-gray-700 bg-gray-800 text-blue-600 focus:ring-blue-500"
+          />
+        </label>
+
+        <label class="flex items-center justify-between gap-4 px-3 py-2 bg-gray-800/60 border border-gray-800 rounded-lg">
+          <span class="text-sm text-gray-300">跳过默认分组绑定</span>
+          <input
+            v-model="sub2apiForm.skip_default_group_bind"
+            type="checkbox"
+            class="h-4 w-4 rounded border-gray-700 bg-gray-800 text-blue-600 focus:ring-blue-500"
+          />
+        </label>
+      </div>
+
+      <div class="mt-4 border-t border-gray-800 pt-4">
+        <div class="flex items-center justify-between gap-3 mb-3">
+          <div class="text-sm text-gray-400">SUB2API 分组</div>
+          <button
+            type="button"
+            @click="loadSub2apiGroups"
+            :disabled="sub2apiGroupsLoading || !sub2apiForm.url"
+            class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-sm text-gray-200 rounded-lg border border-gray-700 transition disabled:opacity-50"
+          >
+            {{ sub2apiGroupsLoading ? '刷新中...' : '刷新分组' }}
+          </button>
+        </div>
+
+        <div v-if="sub2apiGroups.length" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+          <label
+            v-for="group in sub2apiGroups"
+            :key="group.id"
+            class="flex items-center gap-2 px-3 py-2 bg-gray-800/60 border border-gray-800 rounded-lg text-sm text-gray-200"
+          >
+            <input
+              type="checkbox"
+              :checked="selectedSub2apiGroupIds.includes(group.id)"
+              class="h-4 w-4 rounded border-gray-700 bg-gray-800 text-blue-600 focus:ring-blue-500"
+              @change="toggleSub2apiGroup(group.id, $event.target.checked)"
+            />
+            <span class="truncate">{{ group.name || `分组 ${group.id}` }}</span>
+            <span class="ml-auto font-mono text-xs text-gray-500">#{{ group.id }}</span>
+          </label>
+        </div>
+        <div v-else class="text-xs text-gray-500">
+          {{ sub2apiGroupsLoading ? '正在读取分组...' : '暂无分组列表' }}
+        </div>
+      </div>
+
+      <div class="mt-4 flex justify-end">
+        <button
+          @click="saveSub2apiConfig"
+          :disabled="sub2apiSaving"
+          class="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-sm rounded-lg transition disabled:opacity-50"
+        >
+          {{ sub2apiSaving ? '保存中...' : '保存 SUB2API 配置' }}
+        </button>
+      </div>
+    </div>
+
+    <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
       <div class="flex items-center justify-between mb-4">
         <h2 class="text-lg font-semibold text-white">巡检设置</h2>
         <span v-if="saved" class="text-xs text-green-400 transition">已保存</span>
@@ -399,10 +551,29 @@ const message = ref('')
 const messageClass = ref('')
 const adminSubmittingHint = ref('')
 const codexSubmittingHint = ref('')
+const sub2apiForm = ref({
+  url: '',
+  auth_mode: 'api_key',
+  api_key: '',
+  token: '',
+  api_key_configured: false,
+  token_configured: false,
+  auto_sync: false,
+  skip_default_group_bind: true,
+  group_ids_text: '',
+  concurrency: 10,
+})
+const sub2apiSaving = ref(false)
+const sub2apiSaved = ref(false)
+const sub2apiMessage = ref('')
+const sub2apiMessageClass = ref('')
+const sub2apiGroups = ref([])
+const sub2apiGroupsLoading = ref(false)
 
 const adminConfigured = computed(() => !!props.adminStatus?.configured)
 const adminBusy = computed(() => !!props.adminStatus?.login_in_progress)
 const codexBusy = computed(() => !!props.codexStatus?.in_progress)
+const selectedSub2apiGroupIds = computed(() => parseSub2apiGroupIds(sub2apiForm.value.group_ids_text))
 
 watch(
   () => props.adminStatus,
@@ -449,6 +620,12 @@ onMounted(async () => {
   } catch (e) {
     console.error('加载巡检配置失败:', e)
   }
+
+  try {
+    await loadSub2apiConfig()
+  } catch (e) {
+    console.error('加载 SUB2API 配置失败:', e)
+  }
 })
 
 function setMessage(text, type = 'success') {
@@ -460,6 +637,96 @@ function setMessage(text, type = 'success') {
   setMessage._timer = window.setTimeout(() => {
     message.value = ''
   }, 8000)
+}
+
+function setSub2apiMessage(text, type = 'success') {
+  sub2apiMessage.value = text
+  sub2apiMessageClass.value = type === 'success'
+    ? 'bg-green-500/10 text-green-400 border-green-500/20'
+    : 'bg-red-500/10 text-red-400 border-red-500/20'
+  window.clearTimeout(setSub2apiMessage._timer)
+  setSub2apiMessage._timer = window.setTimeout(() => {
+    sub2apiMessage.value = ''
+  }, 8000)
+}
+
+function parseSub2apiGroupIds(value) {
+  const seen = new Set()
+  return String(value || '')
+    .split(/[\s,，]+/)
+    .map(item => Number.parseInt(item, 10))
+    .filter((item) => {
+      if (!Number.isInteger(item) || item <= 0 || seen.has(item)) return false
+      seen.add(item)
+      return true
+    })
+}
+
+function applySub2apiConfig(cfg) {
+  sub2apiForm.value = {
+    ...sub2apiForm.value,
+    url: cfg?.url || '',
+    auth_mode: cfg?.auth_mode === 'token' ? 'token' : 'api_key',
+    api_key: '',
+    token: '',
+    api_key_configured: Boolean(cfg?.api_key_configured),
+    token_configured: Boolean(cfg?.token_configured),
+    auto_sync: Boolean(cfg?.auto_sync),
+    skip_default_group_bind: cfg?.skip_default_group_bind !== false,
+    group_ids_text: Array.isArray(cfg?.group_ids) ? cfg.group_ids.join(', ') : '',
+    concurrency: Number(cfg?.concurrency || 10),
+  }
+}
+
+async function loadSub2apiConfig() {
+  const cfg = await api.getSub2apiConfig()
+  applySub2apiConfig(cfg)
+}
+
+async function loadSub2apiGroups() {
+  sub2apiGroupsLoading.value = true
+  try {
+    const result = await api.getSub2apiGroups()
+    sub2apiGroups.value = Array.isArray(result?.items) ? result.items : []
+  } catch (e) {
+    setSub2apiMessage(e.message, 'error')
+  } finally {
+    sub2apiGroupsLoading.value = false
+  }
+}
+
+function toggleSub2apiGroup(groupId, checked) {
+  const ids = selectedSub2apiGroupIds.value.slice()
+  const next = checked
+    ? Array.from(new Set([...ids, groupId]))
+    : ids.filter(id => id !== groupId)
+  sub2apiForm.value.group_ids_text = next.sort((a, b) => a - b).join(', ')
+}
+
+async function saveSub2apiConfig() {
+  sub2apiSaving.value = true
+  sub2apiSaved.value = false
+  try {
+    const rawConcurrency = Number(sub2apiForm.value.concurrency || 10)
+    const cfg = await api.setSub2apiConfig({
+      url: sub2apiForm.value.url,
+      auth_mode: sub2apiForm.value.auth_mode,
+      api_key: sub2apiForm.value.api_key,
+      token: sub2apiForm.value.token,
+      auto_sync: sub2apiForm.value.auto_sync,
+      skip_default_group_bind: sub2apiForm.value.skip_default_group_bind,
+      group_ids: selectedSub2apiGroupIds.value,
+      concurrency: Math.max(1, Math.min(1000, rawConcurrency)),
+    })
+    applySub2apiConfig(cfg)
+    sub2apiSaved.value = true
+    setSub2apiMessage('SUB2API 配置已保存')
+    setTimeout(() => { sub2apiSaved.value = false }, 3000)
+  } catch (e) {
+    setSub2apiMessage(e.message, 'error')
+  } finally {
+    sub2apiSaving.value = false
+  }
 }
 
 async function startLogin() {
