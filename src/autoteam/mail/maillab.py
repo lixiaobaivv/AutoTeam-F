@@ -114,6 +114,13 @@ class MaillabClient(MailProvider):
 
     @staticmethod
     def _parse_response(r: requests.Response, path: str) -> dict:
+        if r.status_code == 404:
+            # 协议错配嗅探:base_url 指向了 cf_temp_email 服务器(只认 /admin/* 路由),
+            # /login 之类的 maillab 路由会返回 404。给出可读切换提示。
+            raise Exception(
+                f"maillab {path} 返回 HTTP 404 — 你的 MAILLAB_API_URL 可能指向 dreamhunter2333/cloudflare_temp_email 服务器,"
+                "请改用 MAIL_PROVIDER=cf_temp_email + CLOUDMAIL_BASE_URL/PASSWORD/DOMAIN。"
+            )
         if r.status_code != 200:
             raise Exception(f"maillab {path} HTTP {r.status_code}: {(r.text or '')[:200]}")
         try:

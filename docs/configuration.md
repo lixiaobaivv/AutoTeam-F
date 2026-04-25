@@ -81,6 +81,23 @@ MAILLAB_DOMAIN=@example.com
 业务调用方零改动:`from autoteam.cloudmail import CloudMailClient` 仍然有效,
 工厂会按 `MAIL_PROVIDER` 自动 dispatch 到对应 provider 实例。
 
+### ⚠️ 协议错配排查(issue #1)
+
+**最常见的错配场景**:从 `cnitlrt/AutoTeam` 上游迁过来的用户,`.env` 里只有 `CLOUDMAIL_*` 配置(因为上游叫"cloudmail"),但本 fork 默认 `MAIL_PROVIDER=cf_temp_email` 走的是 `dreamhunter2333/cloudflare_temp_email` 协议,而上游的 `cloudmail` 实际是 `maillab/cloud-mail` → 启动后看到:
+
+```
+[CloudMail] 管理员鉴权通过        # /admin/address 被 maillab catch-all 路由误回 200
+[验证] CloudMail 登录成功
+[验证] CloudMail 创建邮箱失败: 创建邮箱失败: 响应缺少 address 字段:
+       {'code': 401, 'message': '身份认证失效,请重新登录'}
+```
+
+**解决**:在 `.env` 里加一行 `MAIL_PROVIDER=maillab`,把 `CLOUDMAIL_*` 替换为 `MAILLAB_*` 配置(见上表)。
+
+启动时的协议指纹嗅探(`setup_wizard._sniff_provider_mismatch`)会在 base_url 与 `MAIL_PROVIDER` 不匹配时**提前 warning**;`CfTempEmailClient.login()` / `MaillabClient._parse_response()` 也会在响应特征不对时抛出明确切换提示,不会再出现"半成功"假象。
+
+> 推荐:**首选 `cf_temp_email`(dreamhunter2333/cloudflare_temp_email)** — Cloudflare Workers 部署、与 OpenAI 域名黑名单适配良好、社区验证最广。`maillab` 是兼容选项,适合已经部署了它的用户。
+
 ## Playwright 代理
 
 AutoTeam 的浏览器流量（ChatGPT 登录、邀请接受、Codex OAuth 等）现在支持单独配置代理。

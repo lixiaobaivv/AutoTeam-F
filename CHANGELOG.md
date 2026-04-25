@@ -4,6 +4,18 @@
 
 ## [Unreleased] — 2026-04-25
 
+### mail-provider 协议错配诊断(issue #1)
+
+> [issue #1](https://github.com/ZRainbow1275/AutoTeam-F/issues/1) 报告:从 `cnitlrt/AutoTeam` 迁过来的用户配的 `CLOUDMAIL_*` 实际指向 `maillab/cloud-mail` 服务器,但本 fork 默认 `MAIL_PROVIDER=cf_temp_email` 走的是 `dreamhunter2333/cloudflare_temp_email` 协议 → maillab 服务器把 `/admin/address` 用 catch-all 路由误回 200,login 假成功;后续 `/admin/new_address` 拿到 `{code:401, message:"身份认证失效"}` 才暴露问题。
+
+- **fix(mail): 双向协议错配嗅探** — `CfTempEmailClient.login()` 在 `/admin/address` 响应没有 `results` 字段但有 `code/data` 时抛出明确切换提示;`create_temp_email()` 二次防御 maillab 风格 `{code, message}` 响应。`MaillabClient._parse_response` 收到 HTTP 404 时提示"看起来是 cf_temp_email 服务器"。
+- **feat(setup_wizard): 启动前路由指纹嗅探** — `_sniff_provider_mismatch` 探测 base_url 的 `/admin/address` 与 `/login` 路由活跃度,与 `MAIL_PROVIDER` 期望不一致时打 warning(不阻断启动,真正校验仍走 login/create)。
+- **docs(README): 推荐 `cf_temp_email`** — README 启动小节明确推荐 [`dreamhunter2333/cloudflare_temp_email`](https://github.com/dreamhunter2333/cloudflare_temp_email),并提示从 cnitlrt 迁移的用户:cnitlrt 原版的 "cloudmail" 实际是 [`maillab/cloud-mail`](https://github.com/maillab/cloud-mail),需要显式 `MAIL_PROVIDER=maillab`。
+- **docs(configuration): 协议错配排查小节** — `docs/configuration.md` 新增 issue #1 错配场景的报错样例 + 切换步骤。
+- **docs(README): personal 号牵连失效真相** — "已知限制"小节新增条目:经实测,**母号 Team workspace 被吊销时,从该母号衍生(经 Team 邀请 → leave_workspace → personal OAuth)出来的 free plan personal 号会一起失效**(`/wham/usage` 401/403)。OpenAI 风控关联到 IP / device fingerprint / 邀请链路,不仅仅是 workspace 隶属。母号失效后 personal 号需要全部重新生产。
+- **真机验证**:用户当前 `apimail.icoulsy.asia` 是 cf_temp_email(`/admin/address` 401);issue #1 koast18 的服务器是 maillab(`/login` 路径活跃,响应是 `{code, message}` 格式)。
+
+
 ### invite-hardening:邀请 / 巡检 / 对账三路加固
 
 - **feat(invite): seat fallback 鲁棒性** — `chatgpt_api.invite_member` 新增 `_classify_invite_error`(rate_limited / network / domain_blocked / other) + POST `/invites` 退避重试 `[5s, 15s]`;`_update_invite_seat_type` 的 PATCH 加 1 次重试,全部失败时**保留 codex 席位**(`_seat_type="usage_based"`)而不是丢账号。响应 dict 现在一定包含 `_seat_type` ∈ {`chatgpt`, `usage_based`, `unknown`} 与 `_error_kind`,`invite.py` / `manual_account.py` / `manager._run_post_register_oauth` 都据此把席位类型落到 `accounts.json.seat_type`。
