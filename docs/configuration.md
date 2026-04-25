@@ -21,6 +21,12 @@ cp .env.example .env
 | `MAILLAB_DOMAIN` | maillab 创建邮箱时的域名;缺省回落 `CLOUDMAIL_DOMAIN` | 否 |
 | `CPA_URL` | CLIProxyAPI 地址 | 是（留空使用默认 `http://127.0.0.1:8317`） |
 | `CPA_KEY` | CPA 管理密钥 | 是 |
+| `SUB2API_URL` | SUB2API 地址,例如 `https://sub2api.example.com` | 否 |
+| `SUB2API_API_KEY` | SUB2API 管理 API Key,同步时发送为 `x-api-key` | 否 |
+| `SUB2API_ADMIN_API_KEY` | `SUB2API_API_KEY` 的兼容别名 | 否 |
+| `SUB2API_TOKEN` | SUB2API 管理员 JWT;未设置 API Key 时作为 `Authorization: Bearer` 使用 | 否 |
+| `SUB2API_ADMIN_TOKEN` | `SUB2API_TOKEN` 的兼容别名 | 否 |
+| `SUB2API_SKIP_DEFAULT_GROUP_BIND` | 导入 SUB2API 时是否跳过默认分组绑定 | 否（默认 `true`） |
 | `API_KEY` | Web 面板 / API 鉴权密钥 | 是（首次启动可自动生成） |
 | `PLAYWRIGHT_PROXY_URL` | Playwright 浏览器代理 URL，如 `socks5://user:pass@host:port` | 否 |
 | `PLAYWRIGHT_PROXY_BYPASS` | Playwright 代理绕过列表，如 `localhost,127.0.0.1` | 否 |
@@ -80,6 +86,27 @@ MAILLAB_DOMAIN=@example.com
 
 业务调用方零改动:`from autoteam.cloudmail import CloudMailClient` 仍然有效,
 工厂会按 `MAIL_PROVIDER` 自动 dispatch 到对应 provider 实例。
+
+## SUB2API 同步
+
+同步中心的「同步 SUB2API」会读取本地 `accounts.json` 中 `active` / `personal` 且存在有效
+Codex auth 文件的账号,打包为 SUB2API 的 OpenAI OAuth 账号导入数据:
+
+```dotenv
+SUB2API_URL=https://sub2api.example.com
+SUB2API_API_KEY=your-admin-api-key
+SUB2API_SKIP_DEFAULT_GROUP_BIND=true
+```
+
+如果没有管理 API Key,也可以使用管理员 JWT:
+
+```dotenv
+SUB2API_URL=https://sub2api.example.com
+SUB2API_TOKEN=your-admin-jwt
+```
+
+优先级:`SUB2API_API_KEY` / `SUB2API_ADMIN_API_KEY` 会发送为 `x-api-key`;
+未设置 API Key 时才会使用 `SUB2API_TOKEN` / `SUB2API_ADMIN_TOKEN` 发送 `Bearer` token。
 
 ## Playwright 代理
 

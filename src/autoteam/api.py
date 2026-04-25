@@ -1602,6 +1602,18 @@ def post_sync_from_cpa():
     return {"message": "已从 CPA 同步到本地", "result": result}
 
 
+@app.post("/api/sync/sub2api")
+def post_sync_to_sub2api():
+    """同步认证文件到 SUB2API。"""
+    from autoteam.sub2api_sync import sync_to_sub2api
+
+    try:
+        result = sync_to_sub2api()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"message": "已同步到 SUB2API", "result": result}
+
+
 @app.get("/api/register-failures")
 def get_register_failures_api(limit: int = 50):
     """返回最近的注册/OAuth 失败明细，前端用来展示"为什么账号没生产出来"。"""

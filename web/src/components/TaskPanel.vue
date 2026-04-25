@@ -94,6 +94,7 @@ const actions = [
   { key: 'cleanup', group: 'pool', label: '清理成员', method: 'startCleanup', needParam: false, style: 'bg-rose-600 text-white border-rose-500' },
   { key: 'sync', group: 'sync', label: '同步 CPA', method: 'postSync', needParam: false, sync: true, allowWithoutAdmin: true, style: 'bg-cyan-600 text-white border-cyan-500' },
   { key: 'pull-cpa', group: 'sync', label: '拉取 CPA', method: 'postSyncFromCpa', needParam: false, sync: true, allowWithoutAdmin: true, style: 'bg-emerald-600 text-white border-emerald-500' },
+  { key: 'sync-sub2api', group: 'sync', label: '同步 SUB2API', method: 'postSyncSub2api', needParam: false, sync: true, allowWithoutAdmin: true, style: 'bg-indigo-600 text-white border-indigo-500' },
   { key: 'sync-accounts', group: 'sync', label: '同步账号', method: 'postSyncAccounts', needParam: false, sync: true, allowWithoutAdmin: true, style: 'bg-sky-600 text-white border-sky-500' },
 ]
 
@@ -199,7 +200,7 @@ const panelTitle = computed(() => {
 })
 const adminHint = computed(() => {
   if (props.mode === 'sync') {
-    return '同步类操作可独立使用：同步账号、同步 CPA、拉取 CPA。'
+    return '同步类操作可独立使用：同步账号、同步 CPA、拉取 CPA、同步 SUB2API。'
   }
   return '请先在「设置」页完成管理员登录后，轮转/补满/清理等账号池操作才会开放。'
 })
