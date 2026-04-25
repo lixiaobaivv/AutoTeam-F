@@ -223,6 +223,74 @@ def test_sync_to_sub2api_skips_accounts_that_already_exist(tmp_path, monkeypatch
     assert [item["name"] for item in imported] == ["new@example.com"]
 
 
+def test_sync_to_sub2api_does_not_treat_shared_team_account_id_as_duplicate(tmp_path, monkeypatch):
+    from autoteam import accounts as accounts_mod
+    from autoteam import sub2api_sync
+
+    existing_auth = tmp_path / "codex-existing.json"
+    new_auth = tmp_path / "codex-new.json"
+    _write_auth(existing_auth, "existing@example.com", "shared-team-account-id")
+    _write_auth(new_auth, "new@example.com", "shared-team-account-id")
+
+    monkeypatch.setattr(
+        sub2api_sync,
+        "load_accounts",
+        lambda: [
+            {"email": "existing@example.com", "status": accounts_mod.STATUS_ACTIVE, "auth_file": str(existing_auth)},
+            {"email": "new@example.com", "status": accounts_mod.STATUS_ACTIVE, "auth_file": str(new_auth)},
+        ],
+    )
+    _clear_sub2api_env(monkeypatch)
+    monkeypatch.setenv("SUB2API_URL", "https://sub2api.example.com")
+    monkeypatch.setenv("SUB2API_API_KEY", "admin-key")
+
+    captured_post = {}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        return FakeResponse(
+            data={
+                "code": 0,
+                "data": {
+                    "items": [
+                        {
+                            "id": 123,
+                            "name": "existing@example.com",
+                            "platform": "openai",
+                            "type": "oauth",
+                            "credentials": {
+                                "email": "existing@example.com",
+                                "account_id": "shared-team-account-id",
+                                "chatgpt_account_id": "shared-team-account-id",
+                            },
+                        }
+                    ],
+                    "total": 1,
+                    "page": 1,
+                    "page_size": 1000,
+                    "pages": 1,
+                },
+            }
+        )
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured_post["json"] = json
+        return FakeResponse(data={"code": 0, "data": {"account_created": 1, "account_failed": 0}})
+
+    def fake_put(url, headers=None, json=None, timeout=None):
+        return FakeResponse(data={"code": 0, "data": {"id": 123}})
+
+    monkeypatch.setattr(sub2api_sync.requests, "get", fake_get)
+    monkeypatch.setattr(sub2api_sync.requests, "post", fake_post)
+    monkeypatch.setattr(sub2api_sync.requests, "put", fake_put)
+
+    result = sub2api_sync.sync_to_sub2api()
+
+    assert result["uploaded"] == 1
+    assert result["existing_skipped"] == 1
+    imported = captured_post["json"]["data"]["accounts"]
+    assert [item["name"] for item in imported] == ["new@example.com"]
+
+
 def test_sync_to_sub2api_applies_group_and_concurrency_to_uploaded_accounts(tmp_path, monkeypatch):
     from autoteam import accounts as accounts_mod
     from autoteam import sub2api_sync

@@ -278,25 +278,50 @@ def _clean_string(value) -> str:
     return str(value).strip()
 
 
+def _email_identity(value) -> str:
+    text = _clean_string(value).lower()
+    if not text or "@" not in text:
+        return ""
+
+    if text.endswith(".json"):
+        text = text[:-5]
+    if text.startswith("codex-"):
+        text = text[6:]
+
+    for marker in ("-team-", "-plus-", "-free-", "-personal-", "-unknown-"):
+        if marker in text:
+            text = text.split(marker, 1)[0]
+            break
+
+    if "@" not in text or any(ch.isspace() for ch in text):
+        return ""
+    return text
+
+
 def _account_identity_keys(account: dict) -> set[tuple[str, str]]:
     credentials = account.get("credentials")
     if not isinstance(credentials, dict):
         credentials = {}
 
     keys = set()
-    for field in ("chatgpt_account_id", "account_id"):
-        value = _clean_string(credentials.get(field) or account.get(field))
-        if value:
-            keys.add(("account_id", value))
 
-    email = _clean_string(credentials.get("email") or account.get("email")).lower()
+    email = _email_identity(credentials.get("email") or account.get("email"))
     if email:
         keys.add(("email", email))
 
     name = _clean_string(account.get("name")).lower()
     if name:
-        keys.add(("email", name))
-        keys.add(("name", name))
+        name_email = _email_identity(name)
+        if name_email:
+            keys.add(("email", name_email))
+        else:
+            keys.add(("name", name))
+
+    if not keys:
+        for field in ("chatgpt_account_id", "account_id"):
+            value = _clean_string(credentials.get(field) or account.get(field))
+            if value:
+                keys.add(("account_id", value))
 
     return keys
 

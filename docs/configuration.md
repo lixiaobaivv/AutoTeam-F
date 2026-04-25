@@ -125,7 +125,7 @@ SUB2API_TOKEN=your-admin-jwt
 优先级:`SUB2API_API_KEY` / `SUB2API_ADMIN_API_KEY` 会发送为 `x-api-key`;
 未设置 API Key 时才会使用 `SUB2API_TOKEN` / `SUB2API_ADMIN_TOKEN` 发送 `Bearer` token。
 
-同步前会先查询 SUB2API 现有 OpenAI OAuth 账号,按 `chatgpt_account_id` / `account_id` / `email` / `name` 判断重复。已存在的账号会跳过,不会重复导入。每次同步还会更新本地台账 `data/sub2api_synced_accounts.json`,只记录邮箱、账号 ID、同步时间和 `uploaded` / `existing` 状态,不会写入 token。
+同步前会先查询 SUB2API 现有 OpenAI OAuth 账号,优先按 `email` / `name` 判断重复;只有远端和本地都没有邮箱标识时,才兜底使用 `chatgpt_account_id` / `account_id`。Team 子号的 `account_id` 可能是共享 workspace 标识,不能直接当作账号唯一键。已存在的账号会跳过重复导入,但仍会更新并发额度和目标分组。每次同步还会更新本地台账 `data/sub2api_synced_accounts.json`,只记录邮箱、账号 ID、同步时间和 `uploaded` / `existing` 状态,不会写入 token。
 
 ## Playwright 代理
 
