@@ -68,10 +68,15 @@ def check_auth(request: Request):
 
 
 class SetupConfig(BaseModel):
+    MAIL_PROVIDER: str = "cf_temp_email"
     CLOUDMAIL_BASE_URL: str = ""
     CLOUDMAIL_EMAIL: str = ""
     CLOUDMAIL_PASSWORD: str = ""
     CLOUDMAIL_DOMAIN: str = ""
+    MAILLAB_API_URL: str = ""
+    MAILLAB_USERNAME: str = ""
+    MAILLAB_PASSWORD: str = ""
+    MAILLAB_DOMAIN: str = ""
     CPA_URL: str = "http://127.0.0.1:8317"
     CPA_KEY: str = ""
     PLAYWRIGHT_PROXY_URL: str = ""
@@ -82,13 +87,13 @@ class SetupConfig(BaseModel):
 @app.get("/api/setup/status")
 def get_setup_status():
     """检查配置是否完整"""
-    from autoteam.setup_wizard import REQUIRED_CONFIGS, _read_env
+    from autoteam.setup_wizard import _env_value, _read_env, get_required_configs
 
     env = _read_env()
     fields = []
     all_ok = True
-    for key, prompt, default, optional in REQUIRED_CONFIGS:
-        val = env.get(key, "") or os.environ.get(key, "")
+    for key, prompt, default, optional in get_required_configs(env):
+        val = _env_value(env, key)
         ok = bool(val)
         if not ok and not optional:
             all_ok = False
@@ -101,10 +106,10 @@ def post_setup_save(config: SetupConfig):
     """保存配置到 .env 并验证连通性"""
     import secrets as _secrets
 
-    from autoteam.setup_wizard import REQUIRED_CONFIGS, _write_env
+    from autoteam.setup_wizard import _write_env, get_required_configs
 
     data = config.model_dump()
-    defaults = {key: default for key, _prompt, default, _optional in REQUIRED_CONFIGS}
+    defaults = {key: default for key, _prompt, default, _optional in get_required_configs(data)}
     if not data.get("CPA_URL"):
         data["CPA_URL"] = defaults.get("CPA_URL", "http://127.0.0.1:8317")
     if not data.get("API_KEY"):
